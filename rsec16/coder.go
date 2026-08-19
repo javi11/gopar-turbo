@@ -5,6 +5,7 @@ import (
 	"math"
 	"runtime"
 
+	"github.com/javi11/gopar-turbo/gf16"
 	"github.com/javi11/gopar-turbo/gf2p16"
 	"github.com/klauspost/cpuid/v2"
 )
@@ -139,6 +140,10 @@ func NewCoderPAR2Vandermonde(dataShards, parityShards, numGoroutines int) (Coder
 }
 
 func (c Coder) applyMatrix(m gf2p16.Matrix, in, out [][]byte) {
+	if gf16.Accelerated() {
+		applyMatrixGF16(m, in, out, c.numGoroutines)
+		return
+	}
 	applyMatrixParallelData(m, in, out, c.numGoroutines)
 }
 
