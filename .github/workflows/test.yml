@@ -1,19 +1,67 @@
 name: test
 on: [push, pull_request]
+
 jobs:
-  test:
+  # SIMD (cgo) backend: build the static lib from vendored sources on each
+  # platform, then run the full suite through the ParPar kernels.
+  test-cgo:
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, cgo: "1" }
-          - { os: macos-latest, cgo: "0" }
-          - { os: ubuntu-latest, cgo: "0" }
+          - { os: macos-latest, target: native }   # arm64
+          - { os: macos-15-intel, target: native } # amd64
+          - { os: ubuntu-latest, target: linux/amd64 }
+          - { os: ubuntu-24.04-arm, target: linux/arm64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with: { go-version: "1.26" }
-      - run: CGO_ENABLED=${{ matrix.cgo }} go test ./... -race
-        if: matrix.cgo == '1'
-      - run: CGO_ENABLED=${{ matrix.cgo }} go test ./...
-        if: matrix.cgo == '0'
+      - name: Build gf16 static library
+        run: make -C gf16 ${{ matrix.target }}
+      - name: Test (cgo, race)
+        run: go test ./... -race
+        env: { CGO_ENABLED: "1" }
+
+  test-cgo-windows:
+    runs-on: windows-latest
+    defaults: { run: { shell: msys2 {0} } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc make
+          path-type: inherit
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.26" }
+      - name: Build gf16 static library
+        run: make -C gf16 windows/amd64
+      - name: Test (cgo)
+        run: go test ./...
+        env: { CGO_ENABLED: "1" }
+
+  # Pure-Go fallback backend: must pass everywhere with CGO_ENABLED=0.
+  test-purego:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.26" }
+      - name: Test (pure Go)
+        run: go test ./...
+        env: { CGO_ENABLED: "0" }
+
+  vet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.26" }
+      - run: make -C gf16 linux/amd64
+      - run: go vet ./...
