@@ -46,6 +46,14 @@ gopar-turbo/                    module github.com/javi11/gopar-turbo
 └── cmd/par2repair/      optional CLI for manual testing
 ```
 
+`gf16` is a **public** package with a documented Go API (`NewContext`, `Prepare`,
+`Mul`, `MulAdd`, `MulAddMulti`, `Finish`, `Close`) so external consumers — e.g.
+altmount's streaming PAR2 solver (javi11/altmount#829), which folds slices into
+accumulators using gopar's `gf2p16` today — can use the SIMD backend directly
+without depending on the Decoder layer. Accumulator-style streaming use is a
+first-class scenario: prepare each input once, muladd into k resident
+accumulators, finish only at the end.
+
 Layering: `par2` → `rsec16` → `gf16` (hot loop) / `gf2p16` (scalar math).
 
 ## CGO bridge API
