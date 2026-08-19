@@ -249,8 +249,13 @@ $(BUILDDIR)/gf16/gf16_cksum_avx2.c.o: $(GF16DIR)/gf16_cksum_avx2.c | $(BUILDDIR)
 	$(CC) $(CFLAGS_COMMON) $(DEFINES) $(AVX2_FLAGS) -c -o $@ $<
 $(BUILDDIR)/gf16/gf16_xor_avx2.c.o: $(GF16DIR)/gf16_xor_avx2.c | $(BUILDDIR)/gf16
 	$(CC) $(CFLAGS_COMMON) $(DEFINES) $(AVX2_FLAGS) -c -o $@ $<
+# Needs -mgfni as well as -mavx2: the whole translation unit is guarded by
+# `#if defined(__GFNI__) && defined(__AVX2__)`, and gf16_affine_init_avx2()
+# compiles to `return NULL` without it. That initialiser supplies the scratch
+# tables for GF16_AFFINE_AVX512/AVX10/AVX2 too, so building it as a stub makes
+# those methods segfault on any GFNI-capable CPU. Mirrors the avx512 rule below.
 $(BUILDDIR)/gf16/gf16_affine_avx2.c.o: $(GF16DIR)/gf16_affine_avx2.c | $(BUILDDIR)/gf16
-	$(CC) $(CFLAGS_COMMON) $(DEFINES) $(AVX2_FLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS_COMMON) $(DEFINES) -mgfni $(AVX2_FLAGS) -c -o $@ $<
 
 # AVX-512
 $(BUILDDIR)/gf16/gf_add_avx512.c.o: $(GF16DIR)/gf_add_avx512.c | $(BUILDDIR)/gf16

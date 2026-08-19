@@ -1,6 +1,10 @@
 // bridge.cpp - implements bridge.h over Galois16Mul.
 #include "bridge.h"
 #include "vendor/gf16/gf16mul.h"
+#include "vendor/src/platform.h"
+#ifdef PLATFORM_X86
+# include "vendor/gf16/gf16_affine.h"
+#endif
 
 #include <cstring>
 #include <new>
@@ -39,6 +43,14 @@ void gf16_destroy(gf16_ctx_t* ctx) {
 }
 
 const char* gf16_method_name(gf16_ctx_t* ctx) { return ctx->gf->info().name; }
+int gf16_affine_avx2_built(void) {
+#ifdef PLATFORM_X86
+    return gf16_affine_available_avx2;
+#else
+    return 0;
+#endif
+}
+
 size_t gf16_buf_size(gf16_ctx_t* ctx)  { return ctx->bufSize; }
 size_t gf16_alignment(gf16_ctx_t* ctx) { return ctx->gf->info().alignment; }
 size_t gf16_stride(gf16_ctx_t* ctx)    { return ctx->gf->info().stride; }

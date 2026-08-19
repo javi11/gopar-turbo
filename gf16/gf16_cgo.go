@@ -52,8 +52,12 @@ func NewContext(sliceSize int) (*Context, error) {
 }
 
 func (c *Context) MethodName() string { return C.GoString(C.gf16_method_name(c.ctx)) }
-func (c *Context) BufSize() int       { return c.bufSize }
-func (c *Context) Stride() int        { return c.stride }
+
+// affineAVX2BuiltIn reports whether the GFNI/AVX2 affine translation unit was
+// compiled with -mgfni. See gf16_affine_avx2_built in bridge.h.
+func affineAVX2BuiltIn() bool   { return C.gf16_affine_avx2_built() != 0 }
+func (c *Context) BufSize() int { return c.bufSize }
+func (c *Context) Stride() int  { return c.stride }
 
 func (c *Context) NewBuffer() []byte { return alignedSlice(c.bufSize, c.align) }
 
