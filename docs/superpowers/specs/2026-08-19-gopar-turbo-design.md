@@ -34,7 +34,11 @@ pluggable:
 ```
 gopar-turbo/                    module github.com/javi11/gopar-turbo
 ├── par2/         forked: packets, Decoder, Verify, Repair, DecoderDelegate,
-│                 fileIO interface (custom I/O preserved). Encode path deleted.
+│                 fileIO interface (custom I/O preserved). The encode path is
+│                 retained — gopar's decoder tests build fixtures with it, and
+│                 it shares applyMatrix so it accelerates for free — but
+│                 creation is documented as par2go's job, not a supported
+│                 surface of this library.
 ├── rsec16/       forked: RS coder, reconstruction matrix construction + inversion
 ├── gf2p16/       forked: pure-Go GF(2^16) field math (matrix inversion + fallback)
 ├── gf16/         NEW: hot-loop backend, two implementations behind one Go API:
