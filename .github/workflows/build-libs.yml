@@ -1,0 +1,34 @@
+name: build-libs
+on: workflow_dispatch
+jobs:
+  darwin:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make -C gf16 darwin
+      - uses: actions/upload-artifact@v4
+        with: { name: libgf16_darwin, path: gf16/libgf16_darwin.a }
+  linux-amd64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make -C gf16 linux/amd64
+      - uses: actions/upload-artifact@v4
+        with: { name: libgf16_linux_amd64, path: gf16/libgf16_linux_amd64.a }
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - run: make -C gf16 linux/arm64
+      - uses: actions/upload-artifact@v4
+        with: { name: libgf16_linux_arm64, path: gf16/libgf16_linux_arm64.a }
+  windows-amd64:
+    runs-on: windows-latest
+    defaults: { run: { shell: msys2 {0} } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with: { msystem: MINGW64, install: "mingw-w64-x86_64-gcc make" }
+      - run: make -C gf16 windows/amd64
+      - uses: actions/upload-artifact@v4
+        with: { name: libgf16_windows_amd64, path: gf16/libgf16_windows_amd64.a }
