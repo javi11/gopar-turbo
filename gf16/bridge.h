@@ -29,6 +29,13 @@ void gf16_prepare(gf16_ctx_t* ctx, void* dst, const void* src, size_t src_len);
 // Untransform buf (gf16_buf_size bytes) in place back to standard layout.
 void gf16_finish(gf16_ctx_t* ctx, void* buf);
 
+// Non-zero if the GFNI/AVX2 affine translation unit was built with -mgfni.
+// GF16_AFFINE_AVX512/AVX10/AVX2 all take their scratch tables from
+// gf16_affine_init_avx2(), which compiles to `return NULL` without that flag,
+// so a zero here means those methods segfault on GFNI-capable CPUs.
+// Always 0 on non-x86 builds, where the affine methods don't exist.
+int gf16_affine_avx2_built(void);
+
 // dst/src are prepared buffers; len is a multiple of stride.
 void gf16_mul(gf16_ctx_t* ctx, void* dst, const void* src, size_t len, uint16_t coeff);
 void gf16_muladd(gf16_ctx_t* ctx, void* dst, const void* src, size_t len, uint16_t coeff);

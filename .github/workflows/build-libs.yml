@@ -1,36 +1,127 @@
-name: build-libs
-on: workflow_dispatch
+name: Build gf16 Static Libraries
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - '**'
+    paths:
+      - 'gf16/vendor/**'
+      - 'gf16/bridge.h'
+      - 'gf16/csrc/**'
+      - 'gf16/Makefile'
+
+permissions:
+  contents: write
+
 jobs:
   darwin:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: make -C gf16 darwin
-      - uses: actions/upload-artifact@v4
-        with: { name: libgf16_darwin, path: gf16/libgf16_darwin.a }
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build universal binary (amd64 + arm64)
+        run: make -C gf16 darwin
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libgf16_darwin
+          path: gf16/libgf16_darwin.a
+
   linux-amd64:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: make -C gf16 linux/amd64
-      - uses: actions/upload-artifact@v4
-        with: { name: libgf16_linux_amd64, path: gf16/libgf16_linux_amd64.a }
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: make -C gf16 linux/amd64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libgf16_linux_amd64
+          path: gf16/libgf16_linux_amd64.a
+
   linux-arm64:
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
-      - run: make -C gf16 linux/arm64
-      - uses: actions/upload-artifact@v4
-        with: { name: libgf16_linux_arm64, path: gf16/libgf16_linux_arm64.a }
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: make -C gf16 linux/arm64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libgf16_linux_arm64
+          path: gf16/libgf16_linux_arm64.a
+
   windows-amd64:
     runs-on: windows-latest
-    defaults:
-      run:
-        shell: "msys2 {0}"
     steps:
-      - uses: actions/checkout@v4
-      - uses: msys2/setup-msys2@v2
-        with: { msystem: MINGW64, install: "mingw-w64-x86_64-gcc make" }
-      - run: make -C gf16 windows/amd64
-      - uses: actions/upload-artifact@v4
-        with: { name: libgf16_windows_amd64, path: gf16/libgf16_windows_amd64.a }
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: make
+
+      # Pin the MinGW GCC toolchain to a fixed version so the committed static
+      # library stays ABI-compatible with downstream consumers. MSYS2 is a
+      # rolling repo; GCC 16 dropped the emulated-TLS std::call_once symbols
+      # (__emutls_v._ZSt11__once_call / __once_callable) that older libstdc++
+      # emitted, which breaks linking of this lib in consumers. Consumers must
+      # pin to the SAME version.
+      - name: Pin MinGW GCC toolchain
+        shell: msys2 {0}
+        run: |
+          GCC_VER=15.2.0-14
+          pacman -U --noconfirm \
+            https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-gcc-${GCC_VER}-any.pkg.tar.zst \
+            https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-gcc-libs-${GCC_VER}-any.pkg.tar.zst
+          gcc --version
+
+      - name: Build
+        shell: msys2 {0}
+        run: make -C gf16 windows/amd64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libgf16_windows_amd64
+          path: gf16/libgf16_windows_amd64.a
+
+  commit:
+    needs: [darwin, linux-amd64, linux-arm64, windows-amd64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Commit back onto the branch that triggered the rebuild, so the
+          # updated libraries land next to the sources they were built from.
+          ref: ${{ github.ref_name }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: gf16
+          merge-multiple: true
+
+      - name: Commit updated libraries
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add gf16/libgf16_*.a
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "build: update pre-built gf16 static libraries"
+            git push
+          fi

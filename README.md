@@ -109,9 +109,17 @@ make -C gf16 linux/arm64   # on a linux/arm64 host
 make -C gf16 windows/amd64 # in an MSYS2/MinGW64 shell
 ```
 
-CI (`.github/workflows/build-libs.yml`) builds all four on demand; commit the
-resulting `gf16/libgf16_*.a`. The ubuntu cgo test lane joins the matrix once
-`libgf16_linux_amd64.a` is committed.
+`.github/workflows/build-libs.yml` builds all four in CI and commits the
+resulting `gf16/libgf16_*.a` back to the branch. It runs automatically on any
+push that touches `gf16/vendor/**`, `gf16/csrc/**`, `gf16/bridge.h` or
+`gf16/Makefile`, and can also be started manually from the Actions tab
+(`workflow_dispatch`).
+
+The Windows lane pins MinGW GCC to a fixed version (`15.2.0-14`). MSYS2 is a
+rolling release and GCC 16 dropped the emulated-TLS `std::call_once` symbols
+that older libstdc++ emitted, so an unpinned toolchain produces a library that
+fails to link in consumers. Downstream projects linking the prebuilt Windows
+archive must pin the same version.
 
 ## Licensing
 
