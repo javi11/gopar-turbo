@@ -24,7 +24,9 @@ jobs:
         with: { name: libgf16_linux_arm64, path: gf16/libgf16_linux_arm64.a }
   windows-amd64:
     runs-on: windows-latest
-    defaults: { run: { shell: msys2 {0} } }
+    defaults:
+      run:
+        shell: "msys2 {0}"
     steps:
       - uses: actions/checkout@v4
       - uses: msys2/setup-msys2@v2
