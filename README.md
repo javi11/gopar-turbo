@@ -65,14 +65,18 @@ only which shards are present, so its memory does not grow with the set. On a
 4.36 GiB release the scan itself costs the same as on a 1 GiB one.
 
 Repair reconstructs by folding one input shard at a time into an accumulator
-per *missing* shard, re-reading survivors from disk rather than holding the
-set. `MemoryBudget` bounds that further — when one accumulator per missing
-shard would exceed it, repair splits slices into byte ranges and makes several
-passes over the inputs:
+per *missing* shard, re-reading survivors and recovery blocks from disk rather
+than holding them, and streaming each rebuilt chunk range straight into the
+output file instead of assembling whole files in memory. Repaired files are
+written to temporary siblings and renamed on success, so an aborted repair
+leaves the originals untouched.
+
+Accumulators default to at most 256 MB; `MemoryBudget` lowers that further,
+splitting slices into byte ranges and making several passes over the inputs:
 
 ```go
 par2.Repair("recovery.par2", par2.RepairOptions{
-    MemoryBudget: 512 << 20, // 0 = half of physical memory, like par2cmdline -m
+    MemoryBudget: 64 << 20, // 0 = the 256 MB default
 })
 ```
 
