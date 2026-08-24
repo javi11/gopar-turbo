@@ -30,7 +30,7 @@ const ieeeModulus = 0x104c11db7
 
 // crcz32 is the function such that
 //
-//   crc32.ChecksumIEEE(a) = ffffffff ^ crcz(ffffffff.. ^ a).
+//	crc32.ChecksumIEEE(a) = ffffffff ^ crcz(ffffffff.. ^ a).
 func crcz32(p []byte) uint32 {
 	return 0xffffffff ^ crc32.Update(0xffffffff, crc32.IEEETable, p)
 }

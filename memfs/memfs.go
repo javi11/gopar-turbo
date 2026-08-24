@@ -1,6 +1,9 @@
 package memfs
 
 import (
+	"bytes"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,7 +86,12 @@ func (fs MemFS) FindWithPrefixAndSuffix(prefix, suffix string) ([]string, error)
 // may not already exist.
 func (fs MemFS) WriteFile(path string, data []byte) error {
 	absPath := toAbsPath(fs.workingDir, path)
-	fs.fileData[absPath] = data
+	// Copy, so the caller may reuse its buffer afterwards exactly as it
+	// could with os.WriteFile. Storing the caller's slice let a later
+	// mutation silently rewrite an already-written file.
+	stored := make([]byte, len(data))
+	copy(stored, data)
+	fs.fileData[absPath] = stored
 	return nil
 }
 
@@ -124,4 +132,43 @@ func (fs MemFS) MoveFile(oldPath, newPath string) error {
 	}
 	// Shouldn't return an error.
 	return fs.WriteFile(newPath, data)
+}
+
+// OpenRead returns a reader over the file at path, its size in bytes, and a
+// close function. The close function is a no-op: nothing is held open.
+func (fs MemFS) OpenRead(path string) (io.ReaderAt, int64, func() error, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	return bytes.NewReader(data), int64(len(data)), func() error { return nil }, nil
+}
+
+// memWriter writes into a fixed-size buffer that replaces the file's contents
+// on close.
+type memWriter struct {
+	fs   MemFS
+	path string
+	data []byte
+}
+
+func (w *memWriter) WriteAt(p []byte, off int64) (int, error) {
+	if off < 0 || off+int64(len(p)) > int64(len(w.data)) {
+		return 0, errors.New("memfs: write out of range")
+	}
+	copy(w.data[off:], p)
+	return len(p), nil
+}
+
+// OpenWrite starts a size-byte write of path. Writes land in a private buffer;
+// close(true) installs it as the file's contents, close(false) discards it. A
+// reader of the old contents is unaffected until the commit.
+func (fs MemFS) OpenWrite(path string, size int64) (io.WriterAt, func(commit bool) error, error) {
+	w := &memWriter{fs: fs, path: path, data: make([]byte, size)}
+	return w, func(commit bool) error {
+		if !commit {
+			return nil
+		}
+		return fs.WriteFile(w.path, w.data)
+	}, nil
 }

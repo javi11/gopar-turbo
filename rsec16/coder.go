@@ -180,6 +180,21 @@ func makeReconstructionMatrix(dataShards int, availableRows, missingRows, usedPa
 	return m.RowReduceForInverse(n)
 }
 
+// ParityMatrix returns the matrix that maps data shards onto parity shards,
+// so a caller can generate parity by streaming rather than holding every
+// shard at once.
+func (c Coder) ParityMatrix() gf2p16.Matrix {
+	return c.parityMatrix
+}
+
+// ReconstructionMatrix returns the matrix mapping the available data rows,
+// followed by the used parity rows, onto the missing data rows. Callers that
+// reconstruct by streaming need the matrix without the all-in-memory
+// application that ReconstructData performs.
+func (c Coder) ReconstructionMatrix(availableRows, missingRows, usedParityRows []int) (gf2p16.Matrix, error) {
+	return makeReconstructionMatrix(c.dataShards, availableRows, missingRows, usedParityRows, c.parityMatrix)
+}
+
 // NotEnoughParityShardsError is returned by ReconstructData or if
 // there isn't enough parity shards to reconstruct some missing data.
 type NotEnoughParityShardsError struct{}

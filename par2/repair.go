@@ -26,6 +26,27 @@ type RepairOptions struct {
 	// The RepairDelegate to use. If nil, DoNothingRepairDelegate
 	// is used.
 	RepairDelegate RepairDelegate
+	// If FindMisalignedData is true, a slice that matches no known
+	// shard triggers a byte-wise search for shards that sit off a
+	// slice boundary, as when data has been shifted by an insertion
+	// or deletion. This recovers sets that would otherwise need
+	// parity, but costs up to a full slice of byte-wise scanning per
+	// miss. par2cmdline exposes the same trade-off as -N.
+	//
+	// Defaults to false: a miss advances to the next slice boundary.
+	FindMisalignedData bool
+	// MisalignedSearchLimit bounds how far past a slice boundary the
+	// FindMisalignedData search slides before giving up on that
+	// slice. Zero means unbounded. Ignored when FindMisalignedData
+	// is false.
+	MisalignedSearchLimit int
+	// MemoryBudget caps the bytes held for reconstruction accumulators.
+	// Zero selects a default capped at 256 MB; chunked passes at that size
+	// are measured to cost no wall-clock, so larger values buy nothing.
+	// When the budget is smaller than one accumulator per missing shard,
+	// repair splits slices into byte ranges and makes several passes over
+	// the inputs rather than exceeding it.
+	MemoryBudget int
 }
 
 // RepairResult holds the result of a Repair call.
@@ -58,19 +79,25 @@ func repair(fileIO fileIO, parPath string, options RepairOptions) (RepairResult,
 		numGoroutines = NumGoroutinesDefault()
 	}
 
-	decoder, err := newDecoder(fileIO, delegate, parPath, numGoroutines)
+	decoder, err := newDecoder(fileIO, delegate, parPath, numGoroutines, scanPolicy{
+		findMisaligned: options.FindMisalignedData,
+		searchLimit:    options.MisalignedSearchLimit,
+	}, options.MemoryBudget)
 	if err != nil {
 		return RepairResult{}, err
 	}
 
-	err = decoder.LoadFileData()
-	if err != nil {
+	// The scan and the parity load touch disjoint files and disjoint
+	// decoder fields; running them concurrently hides the shorter phase
+	// entirely.
+	scanErr := make(chan error, 1)
+	go func() { scanErr <- decoder.LoadFileData() }()
+	parityErr := decoder.LoadParityData()
+	if err := <-scanErr; err != nil {
 		return RepairResult{}, err
 	}
-
-	err = decoder.LoadParityData()
-	if err != nil {
-		return RepairResult{}, err
+	if parityErr != nil {
+		return RepairResult{}, parityErr
 	}
 
 	repairedPaths, err := decoder.Repair(options.DoubleCheck)

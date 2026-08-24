@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"hash/crc32"
+	stdio "io"
 	"math/rand"
 	"path/filepath"
 	"sort"
@@ -49,12 +50,12 @@ func TestFillShardInfos(t *testing.T) {
 	dataByteCount := 50
 	id, data, checksumToLocation, fileIntegrityInfos, fileIDIndices, unrelatedData := makeTestFillShardInfoInputs(t, sliceByteCount, dataByteCount)
 
-	hits, misses := fillShardInfos(sliceByteCount, data, checksumToLocation, id, fileIntegrityInfos, fileIDIndices)
+	hits, misses := fillShardInfos(sliceByteCount, data, checksumToLocation, id, fileIntegrityInfos, fileIDIndices, scanPolicy{findMisaligned: true})
 	expectedHits := (dataByteCount + sliceByteCount - 1) / sliceByteCount
 	require.Equal(t, expectedHits, hits)
 	require.Equal(t, 0, misses)
 
-	hits, misses = fillShardInfos(sliceByteCount, unrelatedData, checksumToLocation, id, fileIntegrityInfos, fileIDIndices)
+	hits, misses = fillShardInfos(sliceByteCount, unrelatedData, checksumToLocation, id, fileIntegrityInfos, fileIDIndices, scanPolicy{findMisaligned: true})
 	require.Equal(t, 0, hits)
 	require.Equal(t, dataByteCount, misses)
 }
@@ -68,12 +69,12 @@ func BenchmarkFillShardInfos(b *testing.B) {
 
 	b.Run("related", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			fillShardInfos(sliceByteCount, data, checksumToLocation, id, fileIntegrityInfos, fileIDIndices)
+			fillShardInfos(sliceByteCount, data, checksumToLocation, id, fileIntegrityInfos, fileIDIndices, scanPolicy{findMisaligned: true})
 		}
 	})
 	b.Run("unrelated", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			fillShardInfos(sliceByteCount, unrelatedData, checksumToLocation, id, fileIntegrityInfos, fileIDIndices)
+			fillShardInfos(sliceByteCount, unrelatedData, checksumToLocation, id, fileIntegrityInfos, fileIDIndices, scanPolicy{findMisaligned: true})
 		}
 	})
 }
@@ -90,6 +91,24 @@ func (io testFileIO) ReadFile(path string) (data []byte, err error) {
 		io.t.Logf("ReadFile(%s) => (%d bytes, %v)", path, len(data), err)
 	}()
 	return io.fileIO.ReadFile(path)
+}
+
+func (io testFileIO) OpenRead(path string) (r stdio.ReaderAt, size int64, closeFn func() error, err error) {
+	io.t.Helper()
+	defer func() {
+		io.t.Helper()
+		io.t.Logf("OpenRead(%s) => (%d bytes, %v)", path, size, err)
+	}()
+	return io.fileIO.OpenRead(path)
+}
+
+func (io testFileIO) OpenWrite(path string, size int64) (w stdio.WriterAt, closeFn func(commit bool) error, err error) {
+	io.t.Helper()
+	defer func() {
+		io.t.Helper()
+		io.t.Logf("OpenWrite(%s, %d) => %v", path, size, err)
+	}()
+	return io.fileIO.OpenWrite(path, size)
 }
 
 func (io testFileIO) FindWithPrefixAndSuffix(prefix, suffix string) (matches []string, err error) {
@@ -178,7 +197,7 @@ func buildPAR2Data(t *testing.T, fs memfs.MemFS, basePath string, sliceByteCount
 }
 
 func newDecoderForTest(t *testing.T, fs memfs.MemFS, indexPath string) (*Decoder, error) {
-	return newDecoder(testFileIO{t, fs}, testDecoderDelegate{t}, indexPath, rsec16.DefaultNumGoroutines())
+	return newDecoder(testFileIO{t, fs}, testDecoderDelegate{t}, indexPath, rsec16.DefaultNumGoroutines(), scanPolicy{findMisaligned: true}, 0)
 }
 
 func makeDecoderMemFS(workingDir string) memfs.MemFS {

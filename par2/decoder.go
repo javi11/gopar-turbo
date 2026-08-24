@@ -6,17 +6,36 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
+	"io"
 	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
 	"reflect"
+	"sync"
 
 	"github.com/javi11/gopar-turbo/rsec16"
 )
 
 type fileIO interface {
 	ReadFile(path string) ([]byte, error)
+	// OpenRead returns a reader over path, its size in bytes, and a close
+	// function the caller must invoke. It lets the scanner walk a large
+	// file without materialising it, and lets repair re-read a single
+	// shard by offset.
+	//
+	// The signature uses only stdlib types so that implementations outside
+	// this package satisfy it: Go requires identical method signatures for
+	// interface satisfaction.
+	OpenRead(path string) (io.ReaderAt, int64, func() error, error)
+	// OpenWrite starts a size-byte write of path and returns a positional
+	// writer plus a close function the caller must invoke exactly once:
+	// close(true) commits the result to path, close(false) discards it and
+	// leaves path as it was. It lets repair write reconstructed chunk
+	// ranges directly to their final offsets instead of assembling whole
+	// files in memory, without destroying data still being read out of the
+	// file being replaced.
+	OpenWrite(path string, size int64) (io.WriterAt, func(commit bool) error, error)
 	FindWithPrefixAndSuffix(prefix, suffix string) ([]string, error)
 	WriteFile(path string, data []byte) error
 }
@@ -25,6 +44,48 @@ type defaultFileIO struct{}
 
 func (io defaultFileIO) ReadFile(path string) ([]byte, error) {
 	return ioutil.ReadFile(path)
+}
+
+func (defaultFileIO) OpenRead(path string) (io.ReaderAt, int64, func() error, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, 0, nil, err
+	}
+	return f, fi.Size(), f.Close, nil
+}
+
+func (defaultFileIO) OpenWrite(path string, size int64) (io.WriterAt, func(commit bool) error, error) {
+	// Write to a sibling temp file and rename on close. Truncating path
+	// itself would destroy the surviving shards still being read out of it,
+	// and it would leave a half-written file behind on failure.
+	tmp := path + ".gopar-tmp"
+	f, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := f.Truncate(size); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return nil, nil, err
+	}
+	closeFn := func(commit bool) error {
+		cerr := f.Close()
+		if !commit || cerr != nil {
+			os.Remove(tmp)
+			return cerr
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			os.Remove(tmp)
+			return err
+		}
+		return nil
+	}
+	return f, closeFn, nil
 }
 
 func (io defaultFileIO) FindWithPrefixAndSuffix(prefix, suffix string) ([]string, error) {
@@ -122,12 +183,18 @@ func makeChecksumShardLocationMap(sliceByteCount int, infos []decoderInputFileIn
 }
 
 type shardIntegrityInfo struct {
-	data      []byte
+	// present is true when the shard's bytes were located on disk. The
+	// bytes themselves are not retained: readShard re-reads them from
+	// foundAt when they are actually needed.
+	present bool
+	// foundAt is where the bytes actually live, which is not necessarily
+	// the shard's canonical offset.
+	foundAt   shardLocation
 	locations shardLocationSet
 }
 
 func (info shardIntegrityInfo) ok(location shardLocation) bool {
-	return len(info.data) != 0 && info.locations[location]
+	return info.present && info.locations[location]
 }
 
 type fileIntegrityInfo struct {
@@ -170,17 +237,37 @@ type Decoder struct {
 	nonRecoverySet []decoderInputFileInfo
 
 	numGoroutines int
+	scanPolicy    scanPolicy
+	// memoryBudget caps the bytes held for reconstruction accumulators.
+	// Zero selects defaultMemoryBudget().
+	memoryBudget int
+
+	// scanMu guards shard-match recording and mid-scan delegate calls when
+	// data files are scanned concurrently: a matched slice may belong to a
+	// file other than the one being scanned.
+	scanMu sync.Mutex
+
+	// fileIDIndices maps a file ID to its index in recoverySet, so a shard
+	// can be traced back to the file its bytes live in.
+	fileIDIndices map[fileID]int
 
 	checksumToLocation checksumShardLocationMap
 
 	// Indexed the same as recoverySet.
 	fileIntegrityInfos []fileIntegrityInfo
 
-	parityShards [][]byte
+	// parityLocations[i] is where recovery block i's data lives on disk;
+	// blocks are read back on demand instead of being retained. Entries
+	// with an empty path are absent — parityPresent is the source of truth.
+	parityLocations []parityLocation
+	// parityPresent[i] records that parity shard i exists, even when its
+	// bytes were not retained.
+	parityPresent []bool
 }
 
 // DecoderDelegate holds methods that are called during the decode
-// process.
+// process. Callbacks may arrive from concurrent phases (the data scan and
+// the parity load overlap); implementations must be safe for concurrent use.
 type DecoderDelegate interface {
 	OnCreatorPacketLoad(clientID string)
 	OnMainPacketLoad(sliceByteCount, recoverySetCount, nonRecoverySetCount int)
@@ -245,7 +332,7 @@ func (DoNothingDecoderDelegate) OnDetectDataFileWrongByteCount(fileID [16]byte, 
 // OnDataFileWrite implements the DecoderDelegate interface.
 func (DoNothingDecoderDelegate) OnDataFileWrite(i, n int, path string, byteCount int, err error) {}
 
-func newDecoder(fileIO fileIO, delegate DecoderDelegate, indexPath string, numGoroutines int) (*Decoder, error) {
+func newDecoder(fileIO fileIO, delegate DecoderDelegate, indexPath string, numGoroutines int, policy scanPolicy, memoryBudget int) (*Decoder, error) {
 	indexBytes, err := fileIO.ReadFile(indexPath)
 	if err != nil {
 		return nil, err
@@ -277,15 +364,17 @@ func newDecoder(fileIO fileIO, delegate DecoderDelegate, indexPath string, numGo
 	}
 
 	return &Decoder{
-		fileIO, delegate,
-		indexPath,
-		setID,
-		indexFile.clientID, indexFile.mainPacket.sliceByteCount,
-		recoverySet, nonRecoverySet,
-		numGoroutines,
-		nil,
-		nil,
-		nil,
+		fileIO:         fileIO,
+		delegate:       delegate,
+		indexPath:      indexPath,
+		setID:          setID,
+		clientID:       indexFile.clientID,
+		sliceByteCount: indexFile.mainPacket.sliceByteCount,
+		recoverySet:    recoverySet,
+		nonRecoverySet: nonRecoverySet,
+		numGoroutines:  numGoroutines,
+		scanPolicy:     policy,
+		memoryBudget:   memoryBudget,
 	}, nil
 }
 
@@ -309,14 +398,54 @@ func sliceAndPadByteArray(bs []byte, start, end int) []byte {
 	return slice
 }
 
-func fillShardInfos(sliceByteCount int, data []byte, checksumToLocation checksumShardLocationMap, fileID fileID, fileIntegrityInfos []fileIntegrityInfo, fileIDIndices map[fileID]int) (int, int) {
+// scanPolicy controls how the scanner reacts to a slice-aligned chunk that
+// matches no known shard checksum.
+type scanPolicy struct {
+	// findMisaligned enables the byte-wise rolling-CRC32 search that locates
+	// shards sitting off a slice boundary (data shifted by an insertion or
+	// deletion). It is expensive: every miss can slide up to a whole slice
+	// before the scan resynchronises. When false, a miss simply advances to
+	// the next slice boundary.
+	//
+	// par2cmdline exposes the same trade-off as its -N flag, off by default.
+	findMisaligned bool
+
+	// searchLimit bounds how far the byte-wise search slides past a slice
+	// boundary before giving up on that slice. Zero means unbounded, which
+	// is what findMisaligned alone has always meant.
+	searchLimit int
+}
+
+// defaultScanPolicy skips the misaligned-data search, matching par2cmdline's
+// default. Callers that need it opt in explicitly.
+func defaultScanPolicy() scanPolicy {
+	return scanPolicy{}
+}
+
+// fillShardInfos scans a whole buffer. It is kept for tests and for callers
+// that already hold the entire file.
+func fillShardInfos(sliceByteCount int, data []byte, checksumToLocation checksumShardLocationMap, fileID fileID, fileIntegrityInfos []fileIntegrityInfo, fileIDIndices map[fileID]int, policy scanPolicy) (int, int) {
+	_, hits, misses := scanBuffer(sliceByteCount, data, len(data), 0, checksumToLocation, fileID, fileIntegrityInfos, fileIDIndices, policy, new(sync.Mutex))
+	return hits, misses
+}
+
+// scanBuffer scans buf for known shards, treating baseOffset as the file
+// offset of buf[0]. It keeps scanning while the cursor is below limit, so a
+// caller streaming a file can set limit short of the end and carry the
+// remainder into the next window. It returns the cursor position where it
+// stopped, plus hit and miss counts.
+func scanBuffer(sliceByteCount int, data []byte, limit, baseOffset int, checksumToLocation checksumShardLocationMap, fileID fileID, fileIntegrityInfos []fileIntegrityInfo, fileIDIndices map[fileID]int, policy scanPolicy, mu *sync.Mutex) (int, int, int) {
 	hits := 0
 	misses := 0
 
 	justMissed := false
 	window := newCRC32Window(sliceByteCount)
 	var crcSlice uint32
-	for j := 0; j < len(data); {
+	// slideStart is the slice boundary the current byte-wise search began
+	// from. Only meaningful while justMissed is true.
+	slideStart := 0
+	j := 0
+	for j < limit {
 		slice := sliceAndPadByteArray(data, j, j+sliceByteCount)
 		if justMissed {
 			crcSlice = window.update(crcSlice, data[j-1], slice[len(slice)-1])
@@ -325,31 +454,57 @@ func fillShardInfos(sliceByteCount int, data []byte, checksumToLocation checksum
 		}
 		foundLocations := checksumToLocation.get(crcSlice, slice)
 		if len(foundLocations) == 0 {
-			j++
 			misses++
+
+			// Without the misaligned search, a miss just means this
+			// slice is damaged; move on to the next boundary.
+			if !policy.findMisaligned {
+				j += sliceByteCount
+				justMissed = false
+				continue
+			}
+
+			if !justMissed {
+				slideStart = j
+			}
+			j++
+
+			// Give up on this slice once the search has slid past the
+			// caller's limit, and resume from the next boundary. The
+			// rolling window is no longer contiguous after the jump, so
+			// the next CRC must be computed from scratch.
+			if policy.searchLimit > 0 && j-slideStart >= policy.searchLimit {
+				j = slideStart + sliceByteCount
+				justMissed = false
+				continue
+			}
+
 			justMissed = true
 			continue
 		}
 
-		location := shardLocation{fileID, j}
+		location := shardLocation{fileID, baseOffset + j}
+		mu.Lock()
 		for foundLocation := range foundLocations {
 			integrityInfo := fileIntegrityInfos[fileIDIndices[foundLocation.fileID]]
 			shardInfo := &integrityInfo.shardInfos[foundLocation.start/sliceByteCount]
-			if shardInfo.data == nil {
+			if !shardInfo.present {
 				*shardInfo = shardIntegrityInfo{
-					slice,
-					shardLocationSet{},
+					present:   true,
+					foundAt:   location,
+					locations: shardLocationSet{},
 				}
 			}
 			shardInfo.locations[location] = true
 		}
+		mu.Unlock()
 
 		justMissed = false
 		j += sliceByteCount
 		hits++
 	}
 
-	return hits, misses
+	return j, hits, misses
 }
 
 func (d *Decoder) getFilePath(info decoderInputFileInfo) string {
@@ -358,31 +513,111 @@ func (d *Decoder) getFilePath(info decoderInputFileInfo) string {
 	return filepath.Join(basePath, info.filename)
 }
 
+// scanWindowSize returns the buffer size for the streaming scan. It is a whole
+// number of slices, at least two so the misaligned search can slide a full
+// slice past a boundary without re-reading, and at least a megabyte so reads
+// stay efficient when slices are small.
+func scanWindowSize(sliceByteCount int) int {
+	const minWindow = 1 << 20
+	slices := 2
+	if n := minWindow/sliceByteCount + 1; n > slices {
+		slices = n
+	}
+	return slices * sliceByteCount
+}
+
 func (d *Decoder) fillFileIntegrityInfos(checksumToLocation checksumShardLocationMap, fileIntegrityInfos []fileIntegrityInfo, fileIDIndices map[fileID]int, i int, info decoderInputFileInfo) (int, int, int, error) {
 	path := d.getFilePath(info)
-	data, err := d.fileIO.ReadFile(path)
+	r, size, closeFn, err := d.fileIO.OpenRead(path)
 	if os.IsNotExist(err) {
+		// Guarded: another scanner may concurrently record a match into
+		// this file's fileIntegrityInfo (duplicate slices live anywhere).
+		d.scanMu.Lock()
 		fileIntegrityInfos[i].missing = true
+		d.scanMu.Unlock()
 		return 0, 0, 0, nil
 	} else if err != nil {
-		return len(data), 0, 0, err
+		return 0, 0, 0, err
+	}
+	defer closeFn()
+
+	windowSize := scanWindowSize(d.sliceByteCount)
+	buf := make([]byte, windowSize)
+
+	fullHash := md5.New()
+	head := make([]byte, 0, 16*1024)
+
+	hits, misses := 0, 0
+	carry := 0           // bytes retained at the front of buf from the last window
+	var readOffset int64 // next unread byte in the file
+	windowStart := 0     // file offset of buf[0]
+
+	for {
+		n := windowSize - carry
+		if remaining := size - readOffset; int64(n) > remaining {
+			n = int(remaining)
+		}
+		if n > 0 {
+			if _, err := r.ReadAt(buf[carry:carry+n], readOffset); err != nil {
+				return int(size), hits, misses, err
+			}
+			fullHash.Write(buf[carry : carry+n])
+			if len(head) < cap(head) {
+				head = append(head, buf[carry : carry+n][:min(n, cap(head)-len(head))]...)
+			}
+			readOffset += int64(n)
+		}
+
+		window := buf[:carry+n]
+		if len(window) == 0 {
+			break
+		}
+
+		atEOF := readOffset >= size
+		limit := len(window)
+		if !atEOF {
+			limit -= d.sliceByteCount
+			if limit < 0 {
+				limit = 0
+			}
+		}
+
+		consumed, h, m := scanBuffer(d.sliceByteCount, window, limit, windowStart,
+			checksumToLocation, info.fileID, fileIntegrityInfos, fileIDIndices, d.scanPolicy, &d.scanMu)
+		hits += h
+		misses += m
+
+		if atEOF {
+			break
+		}
+
+		// Carry the unscanned tail to the front of the next window.
+		carry = len(window) - consumed
+		copy(buf, window[consumed:])
+		windowStart += consumed
 	}
 
-	hits, misses := fillShardInfos(d.sliceByteCount, data, checksumToLocation, info.fileID, fileIntegrityInfos, fileIDIndices)
+	var full [md5.Size]byte
+	copy(full[:], fullHash.Sum(nil))
+	sixteenK := md5.Sum(head)
 
-	hashMismatch := sixteenKHash(data) != info.sixteenKHash || md5.Sum(data) != info.hash
+	hashMismatch := sixteenK != info.sixteenKHash || full != info.hash
+	hasWrongByteCount := int(size) != info.byteCount
+	// The flag writes share struct elements with concurrent match recording,
+	// so they take the same lock; the delegate calls ride along so mid-scan
+	// callbacks stay serialized.
+	d.scanMu.Lock()
 	fileIntegrityInfos[i].hashMismatch = hashMismatch
 	if hashMismatch {
 		d.delegate.OnDetectDataFileHashMismatch(info.fileID, path)
 	}
-
-	hasWrongByteCount := len(data) != info.byteCount
 	fileIntegrityInfos[i].hasWrongByteCount = hasWrongByteCount
 	if hasWrongByteCount {
 		d.delegate.OnDetectDataFileWrongByteCount(info.fileID, path)
 	}
+	d.scanMu.Unlock()
 
-	return len(data), hits, misses, nil
+	return int(size), hits, misses, nil
 }
 
 // LoadFileData loads existing file data into memory.
@@ -398,23 +633,63 @@ func (d *Decoder) LoadFileData() error {
 		}
 		fileIDIndices[info.fileID] = i
 	}
+	d.fileIDIndices = fileIDIndices
+
+	// Scan files on a worker pool: per-file hashing is independent and is
+	// nearly all of the cost. Shard-match recording is guarded by scanMu
+	// inside the scanner. Per-file delegate events are emitted afterwards in
+	// file order, exactly as the sequential scan emitted them; on error,
+	// every file is still scanned but the first erroring file in file order
+	// wins, matching the sequential outcome for that file.
+	type scanResult struct {
+		byteCount, hits, misses int
+		err                     error
+	}
+	results := make([]scanResult, len(d.recoverySet))
+
+	numWorkers := d.numGoroutines
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+	if numWorkers > len(d.recoverySet) {
+		numWorkers = len(d.recoverySet)
+	}
+
+	fileIdx := make(chan int)
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+	for w := 0; w < numWorkers; w++ {
+		go func() {
+			defer wg.Done()
+			for i := range fileIdx {
+				byteCount, hits, misses, err := d.fillFileIntegrityInfos(
+					checksumToLocation, fileIntegrityInfos, fileIDIndices, i, d.recoverySet[i])
+				results[i] = scanResult{byteCount, hits, misses, err}
+			}
+		}()
+	}
+	for i := range d.recoverySet {
+		fileIdx <- i
+	}
+	close(fileIdx)
+	wg.Wait()
 
 	for i, info := range d.recoverySet {
 		path := d.getFilePath(info)
-		byteCount, hits, misses, err := d.fillFileIntegrityInfos(checksumToLocation, fileIntegrityInfos, fileIDIndices, i, info)
-		d.delegate.OnDataFileLoad(i+1, len(d.recoverySet), path, byteCount, hits, misses, err)
-		if err != nil {
-			return err
+		res := results[i]
+		d.delegate.OnDataFileLoad(i+1, len(d.recoverySet), path, res.byteCount, res.hits, res.misses, res.err)
+		if res.err != nil {
+			return res.err
 		}
 
-		if byteCount != info.byteCount {
+		if res.byteCount != info.byteCount {
 			var startByteOffset, endByteOffset int
-			if byteCount < info.byteCount {
-				startByteOffset = byteCount
+			if res.byteCount < info.byteCount {
+				startByteOffset = res.byteCount
 				endByteOffset = info.byteCount
 			} else {
 				startByteOffset = info.byteCount
-				endByteOffset = byteCount
+				endByteOffset = res.byteCount
 			}
 			d.delegate.OnDetectCorruptDataChunk(info.fileID, path, startByteOffset, endByteOffset)
 		}
@@ -494,6 +769,17 @@ func (recoveryDelegate) OnDataFileWrite(i, n int, path string, byteCount int, er
 // LoadParityData searches for parity volumes and loads them into
 // memory.
 func (d *Decoder) LoadParityData() error {
+	return d.loadParityData(true)
+}
+
+// LoadParityPresence records which parity shards exist without retaining their
+// bytes. That is all verification needs, and it keeps verify memory
+// independent of the size of the recovery set.
+func (d *Decoder) LoadParityPresence() error {
+	return d.loadParityData(false)
+}
+
+func (d *Decoder) loadParityData(retain bool) error {
 	ext := path.Ext(d.indexPath)
 	base := d.indexPath[:len(d.indexPath)-len(ext)]
 	matches, err := d.fileIO.FindWithPrefixAndSuffix(base+".", ext)
@@ -501,84 +787,154 @@ func (d *Decoder) LoadParityData() error {
 		return err
 	}
 
-	var parityFiles []file
+	var parityPresent []bool
+	var parityLocations []parityLocation
 	for i, match := range matches {
-		parityFile, err := func() (*file, error) {
-			volumeBytes, err := d.fileIO.ReadFile(match)
+		volumeErr := func() error {
+			r, size, closeFn, err := d.fileIO.OpenRead(match)
 			if err != nil {
-				return nil, err
+				return err
 			}
+			defer closeFn()
 
-			// Ignore all the other packet types other
-			// than recovery packets.
-			_, parityFile, err := readFile(recoveryDelegate{d.delegate}, &d.setID, volumeBytes)
-			if _, ok := err.(noPacketsFoundError); ok {
-				return nil, nil
-			} else if err != nil {
-				// TODO: Relax this check.
-				return nil, err
+			// Volumes are streamed packet-by-packet: on large sets they are
+			// hundreds of megabytes each, and only recovery-packet bodies
+			// (in retain mode) are worth keeping.
+			delegate := recoveryDelegate{d.delegate}
+			foundPacket := false
+			var volMainPacket *mainPacket
+
+			err = walkPackets(r, size, func(setID recoverySetID, typ packetType, body []byte, packetOffset int64) error {
+				if setID != d.setID {
+					delegate.OnOtherPacketSkip(setID, typ, len(body))
+					return nil
+				}
+				foundPacket = true
+				switch typ {
+				case mainPacketType:
+					mp, err := readMainPacket(body)
+					if err != nil {
+						return err
+					}
+					volMainPacket = &mp
+					delegate.OnMainPacketLoad(mp.sliceByteCount, len(mp.recoverySet), len(mp.nonRecoverySet))
+				case recoveryPacketType:
+					exp, packet, err := readRecoveryPacket(body)
+					if err != nil {
+						return err
+					}
+					delegate.OnRecoveryPacketLoad(uint16(exp), len(packet.data))
+					if int(exp) >= len(parityPresent) {
+						grow := int(exp+1) - len(parityPresent)
+						parityPresent = append(parityPresent, make([]bool, grow)...)
+						parityLocations = append(parityLocations, make([]parityLocation, grow)...)
+					}
+					parityPresent[exp] = true
+					// Record where the block lives rather than copying it;
+					// the fold reads it back per chunk pass. A recovery
+					// packet's body is a 4-byte exponent then the data.
+					// First wins for duplicate exponents; duplicates are
+					// byte-identical by packet hash.
+					if retain && parityLocations[exp].path == "" {
+						parityLocations[exp] = parityLocation{
+							path:   match,
+							offset: packetOffset + int64(sizeOfPacketHeader()) + 4,
+							length: len(packet.data),
+						}
+					}
+				case creatorPacketType:
+					delegate.OnCreatorPacketLoad(readCreatorPacket(body))
+				case fileDescriptionPacketType:
+					// Parsed for validation only, matching readFile; the
+					// recovery delegate suppresses the callback.
+					fileID, fdp, err := readFileDescriptionPacket(body)
+					if err != nil {
+						return err
+					}
+					delegate.OnFileDescriptionPacketLoad(fileID, fdp.filename, fdp.byteCount)
+				case ifscPacketType:
+					fileID, _, err := readIFSCPacket(body)
+					if err != nil {
+						return err
+					}
+					delegate.OnIFSCPacketLoad(fileID)
+				default:
+					delegate.OnUnknownPacketLoad(typ, len(body))
+				}
+				return nil
+			})
+			if err != nil {
+				return err
 			}
-
-			if d.sliceByteCount != parityFile.mainPacket.sliceByteCount {
-				return nil, errors.New("slice byte count mismatch")
+			if !foundPacket {
+				// No packets for our set: skip the volume, matching the
+				// old noPacketsFoundError handling.
+				return nil
 			}
-
-			if !reflect.DeepEqual(decoderInputFileInfoIDs(d.recoverySet), parityFile.mainPacket.recoverySet) {
-				return nil, errors.New("recovery set mismatch")
+			if volMainPacket != nil {
+				if d.sliceByteCount != volMainPacket.sliceByteCount {
+					return errors.New("slice byte count mismatch")
+				}
+				if !reflect.DeepEqual(decoderInputFileInfoIDs(d.recoverySet), volMainPacket.recoverySet) {
+					return errors.New("recovery set mismatch")
+				}
+				if !reflect.DeepEqual(decoderInputFileInfoIDs(d.nonRecoverySet), volMainPacket.nonRecoverySet) {
+					return errors.New("non-recovery set mismatch")
+				}
 			}
-
-			if !reflect.DeepEqual(decoderInputFileInfoIDs(d.nonRecoverySet), parityFile.mainPacket.nonRecoverySet) {
-				return nil, errors.New("non-recovery set mismatch")
-			}
-
-			return &parityFile, nil
+			return nil
 		}()
-		d.delegate.OnParityFileLoad(i+1, match, err)
-		if err != nil {
-			return err
-		}
-		if parityFile == nil {
-			continue
-		}
-
-		parityFiles = append(parityFiles, *parityFile)
-	}
-
-	var parityShards [][]byte
-	for _, file := range parityFiles {
-		for exponent, packet := range file.recoveryPackets {
-			if int(exponent) >= len(parityShards) {
-				parityShards = append(parityShards, make([][]byte, int(exponent+1)-len(parityShards))...)
-			}
-			parityShards[exponent] = packet.data
+		d.delegate.OnParityFileLoad(i+1, match, volumeErr)
+		if volumeErr != nil {
+			return volumeErr
 		}
 	}
 
-	d.parityShards = parityShards
+	d.parityPresent = parityPresent
+	d.parityLocations = parityLocations
 	return nil
 }
 
-func (d *Decoder) newCoderAndShards() (rsec16.Coder, [][]byte, error) {
-	if len(d.fileIntegrityInfos) == 0 {
-		return rsec16.Coder{}, nil, errors.New("no file integrity info")
+// readShard fills buf with the bytes of the given shard, re-reading them from
+// wherever the scan found them. buf must be sliceByteCount long; a trailing
+// partial slice is zero-padded, matching sliceAndPadByteArray.
+func (d *Decoder) readShard(info shardIntegrityInfo, buf []byte) error {
+	if !info.present {
+		return errors.New("shard not present")
 	}
-
-	if len(d.parityShards) == 0 {
-		return rsec16.Coder{}, nil, errors.New("no parity shards")
+	idx, ok := d.fileIDIndices[info.foundAt.fileID]
+	if !ok {
+		return errors.New("unknown file for shard")
 	}
-
-	var dataShards [][]byte
-	for _, info := range d.fileIntegrityInfos {
-		for _, shardInfo := range info.shardInfos {
-			dataShards = append(dataShards, shardInfo.data)
-		}
-	}
-	coder, err := rsec16.NewCoderPAR2Vandermonde(len(dataShards), len(d.parityShards), d.numGoroutines)
+	path := d.getFilePath(d.recoverySet[idx])
+	r, size, closeFn, err := d.fileIO.OpenRead(path)
 	if err != nil {
-		return rsec16.Coder{}, nil, err
+		return err
 	}
+	defer closeFn()
 
-	return coder, dataShards, err
+	for i := range buf {
+		buf[i] = 0
+	}
+	n := int64(len(buf))
+	if start := int64(info.foundAt.start); start+n > size {
+		n = size - start
+	}
+	if n <= 0 {
+		return nil
+	}
+	_, err = r.ReadAt(buf[:n], int64(info.foundAt.start))
+	return err
+}
+
+// shardBytes returns a freshly allocated copy of a shard's bytes. Callers that
+// loop should prefer readShard with a reused buffer.
+func (d *Decoder) shardBytes(info shardIntegrityInfo) ([]byte, error) {
+	buf := make([]byte, d.sliceByteCount)
+	if err := d.readShard(info, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
 }
 
 // ShardCounts contains shard counts which can be used to deduce
@@ -618,7 +974,7 @@ func (d *Decoder) ShardCounts() ShardCounts {
 
 	for _, info := range d.fileIntegrityInfos {
 		for _, shardInfo := range info.shardInfos {
-			if shardInfo.data == nil {
+			if !shardInfo.present {
 				unusableDataShardCount++
 			} else {
 				usableDataShardCount++
@@ -629,11 +985,11 @@ func (d *Decoder) ShardCounts() ShardCounts {
 	usableParityShardCount := 0
 	unusableParityShardCount := 0
 
-	for _, shard := range d.parityShards {
-		if shard == nil {
-			unusableParityShardCount++
-		} else {
+	for _, present := range d.parityPresent {
+		if present {
 			usableParityShardCount++
+		} else {
+			unusableParityShardCount++
 		}
 	}
 
@@ -651,78 +1007,157 @@ func (d *Decoder) ShardCounts() ShardCounts {
 // NewDecoder) in no particular order, which is present even if an
 // error is returned. If checkParity is true, extra checking is done
 // of the reconstructed parity data.
+//
+// Repaired files are written to temporary siblings and renamed into place,
+// so a failed repair leaves the originals untouched.
 func (d *Decoder) Repair(checkParity bool) ([]string, error) {
-	coder, dataShards, err := d.newCoderAndShards()
-	if err != nil {
-		return nil, err
-	}
-
-	err = coder.ReconstructData(dataShards, d.parityShards)
-	if err != nil {
-		return nil, err
-	}
-
-	if checkParity {
-		computedParityShards := coder.GenerateParity(dataShards)
-		for i, shard := range d.parityShards {
-			if len(shard) == 0 {
-				continue
-			}
-
-			eq := reflect.DeepEqual(computedParityShards[i], shard)
-			if !eq {
-				return nil, errors.New("repair failed")
-			}
-		}
-	}
-
 	wasOK := make([]bool, len(d.fileIntegrityInfos))
-
-	k := 0
 	for i, info := range d.fileIntegrityInfos {
 		wasOK[i] = info.ok(d.sliceByteCount)
-		shardCount := len(info.shardInfos)
-		for j, shard := range dataShards[k : k+shardCount] {
-			info.shardInfos[j] = shardIntegrityInfo{
-				data:      shard,
-				locations: d.checksumToLocation.get(crc32.ChecksumIEEE(shard), shard),
-			}
-		}
-		k += shardCount
-		d.fileIntegrityInfos[i] = info
 	}
 
-	var repairedPaths []string
+	cache := newReaderCache(d)
+	defer cache.Close()
 
-	for i, decoderInputFileInfo := range d.recoverySet {
-		fileIntegrityInfo := d.fileIntegrityInfos[i]
+	// Reading shards on demand means rewriting one file can destroy the
+	// source of another's shards (two files' contents swapped). Pre-read any
+	// cross-file surviving shard whose source file is being rewritten, before
+	// any file is opened for writing.
+	preserved := make(map[int][]byte)
+	if err := d.preserveShardsBeforeOverwrite(cache, preserved, wasOK); err != nil {
+		return nil, err
+	}
+
+	// shardBase[i] is file i's first global shard row.
+	shardBase := make([]int, len(d.recoverySet))
+	base := 0
+	for i, info := range d.fileIntegrityInfos {
+		shardBase[i] = base
+		base += len(info.shardInfos)
+	}
+
+	// Open a positional writer per file needing repair and copy its surviving
+	// shards to their canonical offsets; reconstructed ranges stream in
+	// afterwards, so no whole file is ever buffered.
+	type openFile struct {
+		w       io.WriterAt
+		closeFn func(commit bool) error
+	}
+	writers := make(map[int]*openFile)
+	rowToFile := make(map[int]int)
+	// Discard every still-open writer: an aborted repair must leave the
+	// originals untouched.
+	closeAll := func() {
+		for _, of := range writers {
+			if of.closeFn != nil {
+				_ = of.closeFn(false)
+				of.closeFn = nil
+			}
+		}
+	}
+
+	shardBuf := make([]byte, d.sliceByteCount)
+	for i, inputFileInfo := range d.recoverySet {
 		if wasOK[i] {
 			continue
 		}
+		path := d.getFilePath(inputFileInfo)
+		w, closeFn, err := d.fileIO.OpenWrite(path, int64(inputFileInfo.byteCount))
+		if err != nil {
+			closeAll()
+			return nil, err
+		}
+		writers[i] = &openFile{w: w, closeFn: closeFn}
 
-		buf := bytes.NewBuffer(nil)
-		for _, shardInfo := range fileIntegrityInfo.shardInfos {
-			err := binary.Write(buf, binary.LittleEndian, shardInfo.data)
-			if err != nil {
-				return repairedPaths, err
+		info := d.fileIntegrityInfos[i]
+		for j, si := range info.shardInfos {
+			row := shardBase[i] + j
+			if !si.present {
+				rowToFile[row] = i
+				continue
+			}
+			if shard, ok := preserved[row]; ok {
+				clear(shardBuf)
+				copy(shardBuf, shard)
+			} else if err := cache.readRange(si, 0, shardBuf); err != nil {
+				closeAll()
+				return nil, err
+			}
+			if err := writeShardRange(w, j*d.sliceByteCount, shardBuf, inputFileInfo.byteCount); err != nil {
+				closeAll()
+				return nil, err
 			}
 		}
+	}
 
-		data := buf.Bytes()[:decoderInputFileInfo.byteCount]
-		if sixteenKHash(data) != decoderInputFileInfo.sixteenKHash {
-			return repairedPaths, errors.New("hash mismatch (16k) in reconstructed data")
-		} else if md5.Sum(data) != decoderInputFileInfo.hash {
-			return repairedPaths, errors.New("hash mismatch in reconstructed data")
+	// Stream reconstruction straight into the open files.
+	_, err := d.reconstructTo(cache, preserved, func(row, off int, data []byte) error {
+		i, ok := rowToFile[row]
+		if !ok {
+			return errors.New("reconstructed a shard no file was waiting for")
 		}
+		fileOff := (row-shardBase[i])*d.sliceByteCount + off
+		return writeShardRange(writers[i].w, fileOff, data, d.recoverySet[i].byteCount)
+	})
+	if err != nil {
+		closeAll()
+		return nil, err
+	}
 
-		path := d.getFilePath(decoderInputFileInfo)
-		err = d.fileIO.WriteFile(path, data)
-		d.delegate.OnDataFileWrite(i+1, len(d.recoverySet), path, len(data), err)
-		if err != nil {
+	// Release every reader before committing: Windows refuses to rename over
+	// a file that is still open, and the cache holds the originals open for
+	// survivor reads. Nothing below needs it — checkWrittenFile opens the
+	// repaired file itself, and the parity check builds its own cache.
+	cache.Close()
+
+	// Close, then verify each rewritten file by streaming it back.
+	var repairedPaths []string
+	for i, inputFileInfo := range d.recoverySet {
+		of, ok := writers[i]
+		if !ok {
+			continue
+		}
+		if err := of.closeFn(true); err != nil {
+			of.closeFn = nil
+			closeAll()
 			return repairedPaths, err
 		}
+		of.closeFn = nil
 
+		path := d.getFilePath(inputFileInfo)
+		err := d.checkWrittenFile(path, inputFileInfo)
+		d.delegate.OnDataFileWrite(i+1, len(d.recoverySet), path, inputFileInfo.byteCount, err)
+		if err != nil {
+			closeAll()
+			return repairedPaths, err
+		}
 		repairedPaths = append(repairedPaths, path)
+
+		// The file is now whole: every shard sits at its canonical offset.
+		info := d.fileIntegrityInfos[i]
+		for j := range info.shardInfos {
+			info.shardInfos[j] = shardIntegrityInfo{
+				present:   true,
+				foundAt:   shardLocation{info.fileID, j * d.sliceByteCount},
+				locations: shardLocationSet{{info.fileID, j * d.sliceByteCount}: true},
+			}
+		}
+		info.missing = false
+		info.hashMismatch = false
+		info.hasWrongByteCount = false
+		d.fileIntegrityInfos[i] = info
+	}
+
+	if checkParity {
+		// Every shard now sits at its canonical offset on disk, so the
+		// parity double-check streams from the repaired files. It needs a
+		// fresh cache: the one above holds readers opened before the
+		// rewrites, which would serve pre-repair content.
+		verifyCache := newReaderCache(d)
+		defer verifyCache.Close()
+		if err := d.verifyParity(verifyCache); err != nil {
+			return repairedPaths, err
+		}
 	}
 
 	// TODO: Repair missing parity volumes, too, and then make
@@ -731,8 +1166,180 @@ func (d *Decoder) Repair(checkParity bool) ([]string, error) {
 	return repairedPaths, nil
 }
 
+// writeShardRange writes data at fileOff, clipping at byteCount: the last
+// shard of a file is zero-padded in memory but not on disk.
+func writeShardRange(w io.WriterAt, fileOff int, data []byte, byteCount int) error {
+	if fileOff >= byteCount {
+		return nil
+	}
+	n := len(data)
+	if fileOff+n > byteCount {
+		n = byteCount - fileOff
+	}
+	if n <= 0 {
+		return nil
+	}
+	_, err := w.WriteAt(data[:n], int64(fileOff))
+	return err
+}
+
+// checkWrittenFile streams a repaired file back and verifies its 16k hash and
+// MD5, the same windowed read the scan uses.
+func (d *Decoder) checkWrittenFile(path string, info decoderInputFileInfo) error {
+	r, size, closeFn, err := d.fileIO.OpenRead(path)
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+	if int(size) != info.byteCount {
+		return errors.New("wrong byte count in reconstructed data")
+	}
+
+	fullHash := md5.New()
+	head := make([]byte, 0, 16*1024)
+	buf := make([]byte, 1<<20)
+	for off := int64(0); off < size; {
+		n := len(buf)
+		if int64(n) > size-off {
+			n = int(size - off)
+		}
+		if _, err := r.ReadAt(buf[:n], off); err != nil {
+			return err
+		}
+		fullHash.Write(buf[:n])
+		if len(head) < cap(head) {
+			head = append(head, buf[:min(n, cap(head)-len(head))]...)
+		}
+		off += int64(n)
+	}
+	if md5.Sum(head) != info.sixteenKHash {
+		return errors.New("hash mismatch (16k) in reconstructed data")
+	}
+	var full [md5.Size]byte
+	copy(full[:], fullHash.Sum(nil))
+	if full != info.hash {
+		return errors.New("hash mismatch in reconstructed data")
+	}
+	return nil
+}
+
+// preserveShardsBeforeOverwrite reads, into preserved, every surviving shard
+// that a file needing repair sources from another file that is also about to
+// be rewritten.
+func (d *Decoder) preserveShardsBeforeOverwrite(cache *readerCache, preserved map[int][]byte, wasOK []bool) error {
+	willRewrite := make(map[fileID]bool)
+	for i, info := range d.fileIntegrityInfos {
+		if !wasOK[i] {
+			willRewrite[info.fileID] = true
+		}
+	}
+	if len(willRewrite) == 0 {
+		return nil
+	}
+
+	shardBase := 0
+	for i, info := range d.fileIntegrityInfos {
+		if wasOK[i] {
+			shardBase += len(info.shardInfos)
+			continue
+		}
+		for j, si := range info.shardInfos {
+			idx := shardBase + j
+			if _, done := preserved[idx]; done {
+				continue
+			}
+			// A shard sourced from its own file is safe: the file is
+			// fully assembled in memory before it is written. Only a
+			// shard living in a *different* file that is also being
+			// rewritten can have its source destroyed first.
+			if !si.present || si.foundAt.fileID == info.fileID {
+				continue
+			}
+			if !willRewrite[si.foundAt.fileID] {
+				continue
+			}
+			buf := make([]byte, d.sliceByteCount)
+			if err := cache.readRange(si, 0, buf); err != nil {
+				return err
+			}
+			preserved[idx] = buf
+		}
+		shardBase += len(info.shardInfos)
+	}
+	return nil
+}
+
+// verifyParity recomputes the recovery blocks from the repaired data and
+// compares them against the ones on disk. It folds the data shards in the same
+// bounded way reconstruction does, so the double check does not undo the
+// memory saving it is checking.
+func (d *Decoder) verifyParity(cache *readerCache) error {
+	coder, _, _, _, _, err := d.planReconstruction()
+	if err != nil {
+		return err
+	}
+
+	var dataShards []shardIntegrityInfo
+	for _, info := range d.fileIntegrityInfos {
+		dataShards = append(dataShards, info.shardInfos...)
+	}
+
+	parityCount := len(d.parityPresent)
+	chunk := chunkSizeFor(d.memoryBudget, d.sliceByteCount, parityCount)
+	out := make([][]byte, parityCount)
+
+	for off := 0; off < d.sliceByteCount; off += chunk {
+		n := chunk
+		if off+n > d.sliceByteCount {
+			n = d.sliceByteCount - off
+		}
+		for i := range out {
+			if cap(out[i]) < n {
+				out[i] = make([]byte, n)
+			}
+			out[i] = out[i][:n]
+		}
+
+		buf := make([]byte, d.sliceByteCount)
+		err := rsec16.FoldInputs(coder.ParityMatrix(), len(dataShards), n, func(j int, dst []byte) error {
+			if err := cache.readRange(dataShards[j], 0, buf); err != nil {
+				return err
+			}
+			end := off + n
+			if end > len(buf) {
+				end = len(buf)
+			}
+			copy(dst, buf[off:end])
+			return nil
+		}, out, d.numGoroutines)
+		if err != nil {
+			return err
+		}
+
+		// Compare against the stored recovery blocks, read back from
+		// their volumes a chunk at a time.
+		stored := make([]byte, n)
+		for i, loc := range d.parityLocations {
+			if loc.path == "" || off >= loc.length {
+				continue
+			}
+			end := off + n
+			if end > loc.length {
+				end = loc.length
+			}
+			if err := cache.readAbs(loc.path, loc.offset+int64(off), stored[:end-off]); err != nil {
+				return err
+			}
+			if !bytes.Equal(out[i][:end-off], stored[:end-off]) {
+				return errors.New("repair failed")
+			}
+		}
+	}
+	return nil
+}
+
 // NewDecoder reads the given index file, which usually has a .par2
 // extension.
 func NewDecoder(delegate DecoderDelegate, indexFile string, numGoroutines int) (*Decoder, error) {
-	return newDecoder(defaultFileIO{}, delegate, indexFile, numGoroutines)
+	return newDecoder(defaultFileIO{}, delegate, indexFile, numGoroutines, defaultScanPolicy(), 0)
 }

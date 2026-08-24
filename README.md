@@ -38,6 +38,51 @@ The API is shaped like gopar's: delegates for progress
 (`VerifyDelegate`, `RepairDelegate`), `NumGoroutines` options, and the same
 error semantics (`par2.RepairErrorMeansRepairNecessaryButNotPossible`).
 
+### Misaligned data
+
+When a slice matches no known shard, the scanner can fall back to a byte-wise
+rolling-CRC search that finds shards sitting *off* a slice boundary — the case
+where data has been shifted by an insertion or deletion. That search is
+expensive: every miss can slide up to a full slice before it resynchronises,
+which on a set with 2 MiB slices costs roughly 25× the scan time of an intact
+set. It is therefore **off by default**, matching par2cmdline's `-N` flag:
+
+```go
+par2.Verify("recovery.par2", par2.VerifyOptions{
+    FindMisalignedData:    true, // off by default
+    MisalignedSearchLimit: 64,   // 0 = unbounded (the historical behaviour)
+})
+```
+
+Leave it off for ordinary corruption and missing files, where damage is
+slice-aligned and parity does the work. Turn it on when a file may have been
+shifted rather than corrupted in place.
+
+### Memory
+
+Verify streams: it walks each file through a small sliding window and records
+only which shards are present, so its memory does not grow with the set. On a
+4.36 GiB release the scan itself costs the same as on a 1 GiB one.
+
+Repair reconstructs by folding one input shard at a time into an accumulator
+per *missing* shard, re-reading survivors and recovery blocks from disk rather
+than holding them, and streaming each rebuilt chunk range straight into the
+output file instead of assembling whole files in memory. Repaired files are
+written to temporary siblings and renamed on success, so an aborted repair
+leaves the originals untouched.
+
+Accumulators default to at most 256 MB; `MemoryBudget` lowers that further,
+splitting slices into byte ranges and making several passes over the inputs:
+
+```go
+par2.Repair("recovery.par2", par2.RepairOptions{
+    MemoryBudget: 64 << 20, // 0 = the 256 MB default
+})
+```
+
+The trade is one extra pass over the data in exchange for bounded memory,
+which is the same trade par2cmdline makes.
+
 ## The gf16 package (streaming consumers)
 
 `github.com/javi11/gopar-turbo/gf16` exposes the SIMD backend directly for
@@ -69,8 +114,29 @@ sub-ranges for data parallelism.
 
 ## Performance
 
-Benchmarks on Apple M-series (arm64, method "CLMul (SHA3)"), reconstructing
-missing shards with `rsec16.Coder.ReconstructData`:
+End to end on a real 4.36 GiB Usenet release (47 files, 2,380,956-byte
+slices, 295 recovery blocks, 15% redundancy) on an Apple M4 with 10 cores,
+warm cache, against [par2cmdline-turbo](https://github.com/animetosho/par2cmdline-turbo)
+1.5.0 — which vendors the *same* ParPar kernels, so the comparison is of
+everything around them:
+
+| Scenario | gopar-turbo (cgo) | par2cmdline-turbo | par2cmdline 1.3.0 |
+|---|---|---|---|
+| verify, intact | **2.99s** / 199 MB | 3.89s / 8 MB | 12.44s / 9 MB |
+| verify, 200 damaged slices | **2.87s** / 305 MB | 9.36s / 12 MB | 15.02s / 13 MB |
+| repair, 5 missing files | **8.88s** / 858 MB | 9.29s / 560 MB | 44.8s / 488 MB |
+| repair, 200 corrupt slices | **16.58s** / 1015 MB | 18.37s / 540 MB | 58.4s / 468 MB |
+
+Faster on every scenario, with byte-identical repairs (80 benchmark runs,
+zero mismatches). par2cmdline-turbo still uses less memory: repair is
+1.5–1.9× its footprint, and verify is far above it — the parallel scan's
+per-worker windows are what buy the verify speed. Methodology, a 1 GiB
+variant, the pure-Go numbers, and the full history are in
+[bench/RESULTS.md](bench/RESULTS.md); reproduce with `bench/run.py`
+(see [bench/README.md](bench/README.md)).
+
+Kernel-level benchmarks on Apple M-series (arm64, method "CLMul (SHA3)"),
+reconstructing missing shards with `rsec16.Coder.ReconstructData`:
 
 | Benchmark | cgo (SIMD) | pure Go | speedup |
 |---|---|---|---|
