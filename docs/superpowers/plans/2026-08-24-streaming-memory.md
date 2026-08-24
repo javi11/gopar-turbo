@@ -31,15 +31,17 @@
 - Consumes: nothing.
 - Produces:
   ```go
-  type readerAtCloser interface {
-      io.ReaderAt
-      io.Closer
-  }
-  // OpenRead returns a reader over path plus its size in bytes. The caller
-  // must Close the reader.
-  OpenRead(path string) (readerAtCloser, int64, error)
+  // OpenRead returns a reader over path, its size in bytes, and a close
+  // function the caller must invoke.
+  OpenRead(path string) (io.ReaderAt, int64, func() error, error)
   ```
   Implemented by `defaultFileIO`, `memfs.MemFS`, and `testFileIO`.
+
+  Only stdlib types appear in this signature on purpose. Go requires
+  *identical* method signatures for interface satisfaction, and a defined
+  type such as `readerAtCloser` is not identical to its underlying
+  interface, so a named type declared in `par2` could never be produced by
+  `memfs` without `memfs` importing `par2`.
 
 - [ ] **Step 1: Write the failing test**
 

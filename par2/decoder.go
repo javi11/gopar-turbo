@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
+	"io"
 	"io/ioutil"
 	"os"
 	"path"
@@ -17,6 +18,15 @@ import (
 
 type fileIO interface {
 	ReadFile(path string) ([]byte, error)
+	// OpenRead returns a reader over path, its size in bytes, and a close
+	// function the caller must invoke. It lets the scanner walk a large
+	// file without materialising it, and lets repair re-read a single
+	// shard by offset.
+	//
+	// The signature uses only stdlib types so that implementations outside
+	// this package satisfy it: Go requires identical method signatures for
+	// interface satisfaction.
+	OpenRead(path string) (io.ReaderAt, int64, func() error, error)
 	FindWithPrefixAndSuffix(prefix, suffix string) ([]string, error)
 	WriteFile(path string, data []byte) error
 }
@@ -25,6 +35,19 @@ type defaultFileIO struct{}
 
 func (io defaultFileIO) ReadFile(path string) ([]byte, error) {
 	return ioutil.ReadFile(path)
+}
+
+func (defaultFileIO) OpenRead(path string) (io.ReaderAt, int64, func() error, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, 0, nil, err
+	}
+	return f, fi.Size(), f.Close, nil
 }
 
 func (io defaultFileIO) FindWithPrefixAndSuffix(prefix, suffix string) ([]string, error) {

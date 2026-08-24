@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"hash/crc32"
+	stdio "io"
 	"math/rand"
 	"path/filepath"
 	"sort"
@@ -90,6 +91,15 @@ func (io testFileIO) ReadFile(path string) (data []byte, err error) {
 		io.t.Logf("ReadFile(%s) => (%d bytes, %v)", path, len(data), err)
 	}()
 	return io.fileIO.ReadFile(path)
+}
+
+func (io testFileIO) OpenRead(path string) (r stdio.ReaderAt, size int64, closeFn func() error, err error) {
+	io.t.Helper()
+	defer func() {
+		io.t.Helper()
+		io.t.Logf("OpenRead(%s) => (%d bytes, %v)", path, size, err)
+	}()
+	return io.fileIO.OpenRead(path)
 }
 
 func (io testFileIO) FindWithPrefixAndSuffix(prefix, suffix string) (matches []string, err error) {

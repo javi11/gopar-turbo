@@ -1,6 +1,8 @@
 package memfs
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,4 +126,14 @@ func (fs MemFS) MoveFile(oldPath, newPath string) error {
 	}
 	// Shouldn't return an error.
 	return fs.WriteFile(newPath, data)
+}
+
+// OpenRead returns a reader over the file at path, its size in bytes, and a
+// close function. The close function is a no-op: nothing is held open.
+func (fs MemFS) OpenRead(path string) (io.ReaderAt, int64, func() error, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	return bytes.NewReader(data), int64(len(data)), func() error { return nil }, nil
 }
