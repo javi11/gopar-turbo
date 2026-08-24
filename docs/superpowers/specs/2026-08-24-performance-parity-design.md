@@ -42,9 +42,15 @@ with the cgo backend, while:
 - the gopar-compatible public API shape is unchanged (additive only, and
   nothing new is expected to be needed).
 
-Honest ceiling: on `repair-missing` the competitor sits at the compute floor
-for these kernels, so success there is "within noise" (~10–14s), not a win.
-`verify-*` and `repair-corrupt` are winnable outright.
+The compute floor belongs to both tools equally — same kernels, same 915 GB
+of MulAdd. Our own in-repo benchmark already demonstrates the required
+throughput: `BenchmarkReconstruct_1000x50_64K` moves 1945 MB/s of input
+across 50 outputs ≈ 97 GB/s aggregate through the existing parallel matrix
+path, which prices the fold at ~9.4s. Reaching par2cmdline-turbo's 9.06s
+total therefore requires two things, both design work rather than physics:
+the fold must hit the throughput our own benchmark proves, and the scan and
+parity load must overlap with fold setup instead of running as sequential
+phases. `verify-*` and `repair-corrupt` are winnable outright.
 
 ## Non-goals
 
@@ -86,6 +92,21 @@ the existing per-missing-shard accumulators. `chunkSizeFor` (the
 `MemoryBudget` chunking) now accounts for batch buffers too; when the budget
 is tight it shrinks B before it shrinks the chunk, since small chunks cost
 extra passes over all inputs.
+
+**Throughput gate before integration.** The first deliverable is a
+`FoldInputs` benchmark shaped like the real workload (≥1000 inputs,
+2,380,956-byte slices, ≥200 outputs) with in-memory `next`. The parallel
+fold must reach the aggregate GB/s of `BenchmarkReconstruct_1000x50_64K`'s
+matrix path (~97 GB/s on this host) before any par2 integration lands; unit
+range size (target: fits L2 alongside a batch's source ranges) and batch
+size B are tuned against this benchmark, not guessed.
+
+**Phase overlap in repair.** `LoadParityData` (volume I/O + parse) runs
+concurrently with `LoadFileData` (the scan) — they touch disjoint files and
+disjoint decoder fields, and both must complete before reconstruction plans.
+This hides most of the ~4s scan behind parity I/O and puts total repair time
+at fold-time + ε rather than scan-time + fold-time. Verify keeps the same
+overlap (`LoadParityPresence` alongside the scan) for its own win.
 
 The **pure-Go path** gets the same row-split parallelism (workers own
 disjoint output rows; `MulAndAddByteSliceLE` into rows they own; inputs
@@ -186,10 +207,10 @@ remain the ground truth.
 
 | Scenario | now | target | par2cmdline-turbo |
 |---|---:|---:|---:|
-| verify-intact | 17.4s | ~4–5s | 4.2s |
-| verify-damaged | 16.7s | ~4–6s | 9.6s |
-| repair-missing | 93.4s | ~10–14s | 9.1s |
-| repair-corrupt | 99.9s | ~14–16s | 18.9s |
+| verify-intact | 17.4s | ≤ 4.2s | 4.2s |
+| verify-damaged | 16.7s | ≤ 6s | 9.6s |
+| repair-missing | 93.4s | ≤ 9.5s (fold ~9.4s at proven 97 GB/s, scan overlapped) | 9.1s |
+| repair-corrupt | 99.9s | ≤ 14s | 18.9s |
 
 Verify RSS ~890 MB → ~90 MB; repair RSS unchanged or slightly higher by the
 batch buffers (~76 MB), still far under budget.
