@@ -225,24 +225,56 @@ func foldInputsGF16(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, 
 }
 
 // foldInputsPureGo mirrors foldInputsGF16 without the SIMD backend. The gf2p16
-// helpers accumulate in place, so out doubles as the accumulator.
+// helpers accumulate in place, so out doubles as the accumulator. Workers own
+// disjoint output rows, so no locking is needed; a second raw buffer lets
+// input j+1 be read while j is folded. next calls never overlap: each read
+// starts only after the previous one's result has been received.
 func foldInputsPureGo(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, buf []byte) error, out [][]byte, numGoroutines int) error {
 	for i := range out {
 		clear(out[i])
 	}
+	if numGoroutines > len(out) {
+		numGoroutines = len(out)
+	}
 
-	raw := make([]byte, sliceSize)
+	bufs := [2][]byte{make([]byte, sliceSize), make([]byte, sliceSize)}
+	type readResult struct {
+		buf []byte
+		err error
+	}
+	ready := make(chan readResult, 1)
+	read := func(j int, buf []byte) {
+		clear(buf)
+		err := next(j, buf)
+		ready <- readResult{buf, err}
+	}
+
+	go read(0, bufs[0])
 	for j := 0; j < numInputs; j++ {
-		clear(raw)
-		if err := next(j, raw); err != nil {
-			return err
+		r := <-ready
+		if r.err != nil {
+			return r.err
 		}
-		for i := range out {
-			// out[i] ^= m[i][j] * raw. Starting from a zeroed row, folding
-			// every input matches the MulByteSliceLE-then-
-			// MulAndAddByteSliceLE sequence in applyMatrixSlice.
-			gf2p16.MulAndAddByteSliceLE(m.At(i, j), raw, out[i])
+		if j+1 < numInputs {
+			// Distinct buffer from the one being folded, so the overlap
+			// is safe.
+			go read(j+1, bufs[(j+1)%2])
 		}
+
+		var wg sync.WaitGroup
+		wg.Add(numGoroutines)
+		for w := 0; w < numGoroutines; w++ {
+			go func(w int) {
+				defer wg.Done()
+				for i := w; i < len(out); i += numGoroutines {
+					// out[i] ^= m[i][j] * raw. Starting from a zeroed row,
+					// folding every input matches the MulByteSliceLE-then-
+					// MulAndAddByteSliceLE sequence in applyMatrixSlice.
+					gf2p16.MulAndAddByteSliceLE(m.At(i, j), r.buf, out[i])
+				}
+			}(w)
+		}
+		wg.Wait()
 	}
 	return nil
 }
