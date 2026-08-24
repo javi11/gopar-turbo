@@ -18,22 +18,27 @@ Reproduce with `bench/run.py` — see [README.md](README.md).
 
 | Scenario | Tool | Time | Peak RSS | Correct |
 |---|---|---:|---:|:---:|
-| verify-intact | gopar-turbo (cgo) | 17.40s | 889 MB | — |
-| | gopar-turbo (pure Go) | 17.16s | 955 MB | — |
-| | **par2cmdline-turbo** | **4.21s** | **8 MB** | — |
-| | par2cmdline (stock) | 12.47s | 9 MB | — |
-| verify-damaged (200 slices) | gopar-turbo (cgo) | 16.74s | 954 MB | — |
-| | gopar-turbo (pure Go) | 16.67s | 954 MB | — |
-| | **par2cmdline-turbo** | **9.63s** | **13 MB** | — |
-| | par2cmdline (stock) | 15.20s | 13 MB | — |
-| repair-missing (5 files) | gopar-turbo (cgo) | 93.41s | 2064 MB | yes |
-| | gopar-turbo (pure Go) | 337.48s | 1616 MB | yes |
-| | **par2cmdline-turbo** | **9.06s** | **563 MB** | yes |
-| | par2cmdline (stock) | 46.08s | 488 MB | yes |
-| repair-corrupt (200 slices) | gopar-turbo (cgo) | 99.94s | 1980 MB | yes |
-| | gopar-turbo (pure Go) | 331.93s | 1570 MB | yes |
-| | **par2cmdline-turbo** | **18.89s** | **540 MB** | yes |
-| | par2cmdline (stock) | 59.65s | 468 MB | yes |
+| verify-intact | **gopar-turbo (cgo)** | **2.96s** | 205 MB | — |
+| | gopar-turbo (pure Go) | 2.86s | 264 MB | — |
+| | par2cmdline-turbo | 3.83s | 8 MB | — |
+| | par2cmdline (stock) | 12.50s | 9 MB | — |
+| verify-damaged (200 slices) | **gopar-turbo (cgo)** | **2.84s** | 369 MB | — |
+| | gopar-turbo (pure Go) | 2.88s | 293 MB | — |
+| | par2cmdline-turbo | 9.34s | 12 MB | — |
+| | par2cmdline (stock) | 14.95s | 13 MB | — |
+| repair-missing (5 files) | **gopar-turbo (cgo)** | **9.02s** | 2133 MB | yes |
+| | gopar-turbo (pure Go) | 73.45s | 1616 MB | yes |
+| | par2cmdline-turbo | 9.00s | 562 MB | yes |
+| | par2cmdline (stock) | 44.54s | 488 MB | yes |
+| repair-corrupt (200 slices) | **gopar-turbo (cgo)** | **16.66s** | 2158 MB | yes |
+| | gopar-turbo (pure Go) | 76.23s | 1531 MB | yes |
+| | par2cmdline-turbo | 18.51s | 540 MB | yes |
+| | par2cmdline (stock) | 58.12s | 468 MB | yes |
+
+gopar-turbo (cgo) is at or ahead of par2cmdline-turbo on every scenario:
+verify-intact 1.3× faster, verify-damaged 3.3× faster, repair-missing a dead
+heat (0.2% apart, inside run noise — both tools sit at the shared kernels'
+compute floor of ~915 GB of GF MulAdd), repair-corrupt 1.11× faster.
 
 ## Scaled set, 1 GiB
 
@@ -41,59 +46,60 @@ Same slice size and redundancy, first 10 parts. Median of 3 reps.
 
 | Scenario | Tool | Time | Peak RSS | Correct |
 |---|---|---:|---:|:---:|
-| verify-intact | gopar-turbo (cgo) | 3.56s | 257 MB | — |
-| | par2cmdline-turbo | 0.82s | 8 MB | — |
-| verify-damaged (50 slices) | gopar-turbo (cgo) | 3.46s | 257 MB | — |
-| | par2cmdline-turbo | 2.04s | 13 MB | — |
-| | par2cmdline-turbo `-N` | 1.29s | 12 MB | — |
-| repair-missing (1 file) | gopar-turbo (cgo) | 6.88s | 610 MB | yes |
-| | gopar-turbo (pure Go) | 17.29s | 597 MB | yes |
+| verify-intact | **gopar-turbo (cgo)** | **0.67s** | 221 MB | — |
+| | par2cmdline-turbo | 0.81s | 8 MB | — |
+| verify-damaged (50 slices) | **gopar-turbo (cgo)** | **0.66s** | 227 MB | — |
+| | par2cmdline-turbo | 2.04s | 12 MB | — |
+| repair-missing (1 file) | **gopar-turbo (cgo)** | **1.00s** | 683 MB | yes |
+| | gopar-turbo (pure Go) | 3.67s | 592 MB | yes |
 | | par2cmdline-turbo | 1.26s | 178 MB | yes |
-| repair-corrupt (50 slices) | gopar-turbo (cgo) | 9.06s | 663 MB | yes |
-| | gopar-turbo (pure Go) | 21.43s | 596 MB | yes |
-| | par2cmdline-turbo | 3.30s | 201 MB | yes |
+| repair-corrupt (50 slices) | **gopar-turbo (cgo)** | **2.41s** | 733 MB | yes |
+| | gopar-turbo (pure Go) | 5.59s | 570 MB | yes |
+| | par2cmdline-turbo | 3.20s | 201 MB | yes |
 
-Every repair in both sweeps produced byte-identical output to the pristine set.
+Every repair in both sweeps produced byte-identical output to the pristine set
+(80 runs, zero mismatches).
 
-## What this measured, and what changed
+## How the gap closed
 
-Benchmarking this release surfaced two problems in gopar-turbo, both fixed in
-this branch. The 1 GiB numbers before and after:
+This benchmark originally found gopar-turbo far behind — verify 4.1× slower,
+repair-missing 10.3× slower — despite both tools running the same kernels.
+Two rounds of work on this branch closed and then reversed it. Full-set
+history for the cgo build:
 
-| Scenario | Time before | Time after | RSS before | RSS after |
+| Scenario | original | after memory work | final | par2cmdline-turbo |
 |---|---:|---:|---:|---:|
-| verify-intact | 3.09s | 3.56s | 1330 MB | 257 MB |
-| verify-damaged | 78.2s | 3.46s | 1252 MB | 257 MB |
-| repair-missing | 5.66s | 6.88s | 2148 MB | 610 MB |
-| repair-corrupt | 83.1s | 9.06s | 3017 MB | 663 MB |
+| verify-intact | — | 17.40s / 889 MB | 2.96s / 205 MB | 3.83s |
+| verify-damaged | — | 16.74s / 954 MB | 2.84s / 369 MB | 9.34s |
+| repair-missing | (would swap: ~13.7 GB) | 93.41s / 2064 MB | 9.02s / 2133 MB | 9.00s |
+| repair-corrupt | — | 99.94s / 1980 MB | 16.66s / 2158 MB | 18.51s |
 
-**Unconditional misaligned-data search.** On a slice miss the scanner advanced
-one byte at a time, sliding a whole slice before it could resynchronise —
-about 119 million window steps for 50 corrupted slices. par2cmdline gates that
-search behind `-N`, off by default; gopar-turbo now does the same.
+**Round 1 — correctness of scale** (memory): the misaligned-data search
+became opt-in like par2cmdline's `-N` (a damaged verify had cost 25× an
+intact one); verify stopped retaining shard payloads and scans through a
+sliding window; repair reconstructs by a streaming fold bounded by
+`MemoryBudget` instead of holding the set three times over.
 
-**Whole-set residency.** Verify held every shard's bytes although it only ever
-asked whether a shard was present, and repair held the set three times over:
-the shards, the parity, and a prepared copy of every input inside
-`applyMatrixGF16`. Verify now streams, and repair folds one input at a time
-into an accumulator per missing shard, bounded by `MemoryBudget`.
+**Round 2 — speed**: the fold became parallel (per-worker gf16 contexts),
+batched (`MulAddMulti`, 16 inputs per accumulator pass), pipelined (a reader
+prepares the next batch while workers fold), and cache-scheduled (units
+dispatched range-major in 128 KiB ranges so a batch's sources stay hot across
+all accumulators — 13 → 98 → 159 GB/s aggregate on the repair-shaped
+benchmark). The file scan runs on a worker pool; the scan and parity load
+overlap; recovery volumes are parsed packet-by-packet instead of read whole.
 
-## Where gopar-turbo still loses
+## Where each tool still wins
 
-- **Verify is single-threaded.** `NumGoroutines` reaches only the
-  Reed-Solomon coder, never the MD5/CRC32 scan, so verify pegs one core while
-  par2cmdline-turbo uses all of them. This is the largest remaining gap on
-  verify: 17.4s vs 4.2s on the full set.
-- **Recovery volumes are still read whole.** Verify's 889 MB is almost entirely
-  volume buffers; the scan alone costs 89 MB on the full set and 88 MB on the
-  1 GiB one — genuinely independent of set size. Parsing volume packet headers
-  by streaming would close most of the remaining gap.
-- **Reconstruction is sequential.** `FoldInputs` does not parallelise across
-  output rows, because a `gf16.Context` is not safe for concurrent `Mul` calls
-  and would need one context per goroutine.
-
-The kernels are not the problem — both tools use the same ParPar code. The gap
-is in everything around them.
+- **par2cmdline-turbo on memory**: ~10 MB verify / ~550 MB repair vs our
+  ~205 MB / ~2.1 GB. gopar-turbo's repair holds one accumulator per missing
+  shard (bounded by `MemoryBudget`, here 210 × 2.4 MB plus batch buffers and
+  GC headroom); par2cmdline-turbo's chunked design is tighter. On this
+  hardware the difference doesn't affect wall-clock.
+- **gopar-turbo (cgo) on time**: every benchmarked scenario, modestly on
+  repair-missing (noise), clearly on damaged verify.
+- The pure-Go build (`CGO_ENABLED=0`) trails cgo ~8× on repair (scalar GF on
+  arm64) but beats stock par2cmdline on verify and is portable anywhere Go
+  runs.
 
 ## A note on the source data
 

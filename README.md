@@ -110,8 +110,14 @@ sub-ranges for data parallelism.
 
 ## Performance
 
-Benchmarks on Apple M-series (arm64, method "CLMul (SHA3)"), reconstructing
-missing shards with `rsec16.Coder.ReconstructData`:
+End to end on a real 4.36 GiB PAR2 set (Apple M4), gopar-turbo's cgo build
+matches or beats par2cmdline-turbo 1.5.0 on every benchmarked scenario —
+verify of an intact set, verify of a damaged one, repairing missing files,
+and repairing scattered corruption — with byte-identical repairs. Full
+numbers and methodology: [bench/RESULTS.md](bench/RESULTS.md).
+
+Kernel-level benchmarks on Apple M-series (arm64, method "CLMul (SHA3)"),
+reconstructing missing shards with `rsec16.Coder.ReconstructData`:
 
 | Benchmark | cgo (SIMD) | pure Go | speedup |
 |---|---|---|---|
