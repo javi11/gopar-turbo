@@ -114,11 +114,26 @@ sub-ranges for data parallelism.
 
 ## Performance
 
-End to end on a real 4.36 GiB PAR2 set (Apple M4), gopar-turbo's cgo build
-matches or beats par2cmdline-turbo 1.5.0 on every benchmarked scenario —
-verify of an intact set, verify of a damaged one, repairing missing files,
-and repairing scattered corruption — with byte-identical repairs. Full
-numbers and methodology: [bench/RESULTS.md](bench/RESULTS.md).
+End to end on a real 4.36 GiB Usenet release (47 files, 2,380,956-byte
+slices, 295 recovery blocks, 15% redundancy) on an Apple M4 with 10 cores,
+warm cache, against [par2cmdline-turbo](https://github.com/animetosho/par2cmdline-turbo)
+1.5.0 — which vendors the *same* ParPar kernels, so the comparison is of
+everything around them:
+
+| Scenario | gopar-turbo (cgo) | par2cmdline-turbo | par2cmdline 1.3.0 |
+|---|---|---|---|
+| verify, intact | **2.99s** / 199 MB | 3.89s / 8 MB | 12.44s / 9 MB |
+| verify, 200 damaged slices | **2.87s** / 305 MB | 9.36s / 12 MB | 15.02s / 13 MB |
+| repair, 5 missing files | **8.88s** / 858 MB | 9.29s / 560 MB | 44.8s / 488 MB |
+| repair, 200 corrupt slices | **16.58s** / 1015 MB | 18.37s / 540 MB | 58.4s / 468 MB |
+
+Faster on every scenario, with byte-identical repairs (80 benchmark runs,
+zero mismatches). par2cmdline-turbo still uses less memory: repair is
+1.5–1.9× its footprint, and verify is far above it — the parallel scan's
+per-worker windows are what buy the verify speed. Methodology, a 1 GiB
+variant, the pure-Go numbers, and the full history are in
+[bench/RESULTS.md](bench/RESULTS.md); reproduce with `bench/run.py`
+(see [bench/README.md](bench/README.md)).
 
 Kernel-level benchmarks on Apple M-series (arm64, method "CLMul (SHA3)"),
 reconstructing missing shards with `rsec16.Coder.ReconstructData`:
