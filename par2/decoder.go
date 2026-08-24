@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"sync"
 
 	"github.com/javi11/gopar-turbo/rsec16"
 )
@@ -204,6 +205,11 @@ type Decoder struct {
 	// Zero selects defaultMemoryBudget().
 	memoryBudget int
 
+	// scanMu guards shard-match recording and mid-scan delegate calls when
+	// data files are scanned concurrently: a matched slice may belong to a
+	// file other than the one being scanned.
+	scanMu sync.Mutex
+
 	// fileIDIndices maps a file ID to its index in recoverySet, so a shard
 	// can be traced back to the file its bytes live in.
 	fileIDIndices map[fileID]int
@@ -378,7 +384,7 @@ func defaultScanPolicy() scanPolicy {
 // fillShardInfos scans a whole buffer. It is kept for tests and for callers
 // that already hold the entire file.
 func fillShardInfos(sliceByteCount int, data []byte, checksumToLocation checksumShardLocationMap, fileID fileID, fileIntegrityInfos []fileIntegrityInfo, fileIDIndices map[fileID]int, policy scanPolicy) (int, int) {
-	_, hits, misses := scanBuffer(sliceByteCount, data, len(data), 0, checksumToLocation, fileID, fileIntegrityInfos, fileIDIndices, policy)
+	_, hits, misses := scanBuffer(sliceByteCount, data, len(data), 0, checksumToLocation, fileID, fileIntegrityInfos, fileIDIndices, policy, new(sync.Mutex))
 	return hits, misses
 }
 
@@ -387,7 +393,7 @@ func fillShardInfos(sliceByteCount int, data []byte, checksumToLocation checksum
 // caller streaming a file can set limit short of the end and carry the
 // remainder into the next window. It returns the cursor position where it
 // stopped, plus hit and miss counts.
-func scanBuffer(sliceByteCount int, data []byte, limit, baseOffset int, checksumToLocation checksumShardLocationMap, fileID fileID, fileIntegrityInfos []fileIntegrityInfo, fileIDIndices map[fileID]int, policy scanPolicy) (int, int, int) {
+func scanBuffer(sliceByteCount int, data []byte, limit, baseOffset int, checksumToLocation checksumShardLocationMap, fileID fileID, fileIntegrityInfos []fileIntegrityInfo, fileIDIndices map[fileID]int, policy scanPolicy, mu *sync.Mutex) (int, int, int) {
 	hits := 0
 	misses := 0
 
@@ -437,6 +443,7 @@ func scanBuffer(sliceByteCount int, data []byte, limit, baseOffset int, checksum
 		}
 
 		location := shardLocation{fileID, baseOffset + j}
+		mu.Lock()
 		for foundLocation := range foundLocations {
 			integrityInfo := fileIntegrityInfos[fileIDIndices[foundLocation.fileID]]
 			shardInfo := &integrityInfo.shardInfos[foundLocation.start/sliceByteCount]
@@ -449,6 +456,7 @@ func scanBuffer(sliceByteCount int, data []byte, limit, baseOffset int, checksum
 			}
 			shardInfo.locations[location] = true
 		}
+		mu.Unlock()
 
 		justMissed = false
 		j += sliceByteCount
@@ -481,7 +489,11 @@ func (d *Decoder) fillFileIntegrityInfos(checksumToLocation checksumShardLocatio
 	path := d.getFilePath(info)
 	r, size, closeFn, err := d.fileIO.OpenRead(path)
 	if os.IsNotExist(err) {
+		// Guarded: another scanner may concurrently record a match into
+		// this file's fileIntegrityInfo (duplicate slices live anywhere).
+		d.scanMu.Lock()
 		fileIntegrityInfos[i].missing = true
+		d.scanMu.Unlock()
 		return 0, 0, 0, nil
 	} else if err != nil {
 		return 0, 0, 0, err
@@ -530,7 +542,7 @@ func (d *Decoder) fillFileIntegrityInfos(checksumToLocation checksumShardLocatio
 		}
 
 		consumed, h, m := scanBuffer(d.sliceByteCount, window, limit, windowStart,
-			checksumToLocation, info.fileID, fileIntegrityInfos, fileIDIndices, d.scanPolicy)
+			checksumToLocation, info.fileID, fileIntegrityInfos, fileIDIndices, d.scanPolicy, &d.scanMu)
 		hits += h
 		misses += m
 
@@ -549,16 +561,20 @@ func (d *Decoder) fillFileIntegrityInfos(checksumToLocation checksumShardLocatio
 	sixteenK := md5.Sum(head)
 
 	hashMismatch := sixteenK != info.sixteenKHash || full != info.hash
+	hasWrongByteCount := int(size) != info.byteCount
+	// The flag writes share struct elements with concurrent match recording,
+	// so they take the same lock; the delegate calls ride along so mid-scan
+	// callbacks stay serialized.
+	d.scanMu.Lock()
 	fileIntegrityInfos[i].hashMismatch = hashMismatch
 	if hashMismatch {
 		d.delegate.OnDetectDataFileHashMismatch(info.fileID, path)
 	}
-
-	hasWrongByteCount := int(size) != info.byteCount
 	fileIntegrityInfos[i].hasWrongByteCount = hasWrongByteCount
 	if hasWrongByteCount {
 		d.delegate.OnDetectDataFileWrongByteCount(info.fileID, path)
 	}
+	d.scanMu.Unlock()
 
 	return int(size), hits, misses, nil
 }
@@ -578,22 +594,61 @@ func (d *Decoder) LoadFileData() error {
 	}
 	d.fileIDIndices = fileIDIndices
 
+	// Scan files on a worker pool: per-file hashing is independent and is
+	// nearly all of the cost. Shard-match recording is guarded by scanMu
+	// inside the scanner. Per-file delegate events are emitted afterwards in
+	// file order, exactly as the sequential scan emitted them; on error,
+	// every file is still scanned but the first erroring file in file order
+	// wins, matching the sequential outcome for that file.
+	type scanResult struct {
+		byteCount, hits, misses int
+		err                     error
+	}
+	results := make([]scanResult, len(d.recoverySet))
+
+	numWorkers := d.numGoroutines
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+	if numWorkers > len(d.recoverySet) {
+		numWorkers = len(d.recoverySet)
+	}
+
+	fileIdx := make(chan int)
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+	for w := 0; w < numWorkers; w++ {
+		go func() {
+			defer wg.Done()
+			for i := range fileIdx {
+				byteCount, hits, misses, err := d.fillFileIntegrityInfos(
+					checksumToLocation, fileIntegrityInfos, fileIDIndices, i, d.recoverySet[i])
+				results[i] = scanResult{byteCount, hits, misses, err}
+			}
+		}()
+	}
+	for i := range d.recoverySet {
+		fileIdx <- i
+	}
+	close(fileIdx)
+	wg.Wait()
+
 	for i, info := range d.recoverySet {
 		path := d.getFilePath(info)
-		byteCount, hits, misses, err := d.fillFileIntegrityInfos(checksumToLocation, fileIntegrityInfos, fileIDIndices, i, info)
-		d.delegate.OnDataFileLoad(i+1, len(d.recoverySet), path, byteCount, hits, misses, err)
-		if err != nil {
-			return err
+		res := results[i]
+		d.delegate.OnDataFileLoad(i+1, len(d.recoverySet), path, res.byteCount, res.hits, res.misses, res.err)
+		if res.err != nil {
+			return res.err
 		}
 
-		if byteCount != info.byteCount {
+		if res.byteCount != info.byteCount {
 			var startByteOffset, endByteOffset int
-			if byteCount < info.byteCount {
-				startByteOffset = byteCount
+			if res.byteCount < info.byteCount {
+				startByteOffset = res.byteCount
 				endByteOffset = info.byteCount
 			} else {
 				startByteOffset = info.byteCount
-				endByteOffset = byteCount
+				endByteOffset = res.byteCount
 			}
 			d.delegate.OnDetectCorruptDataChunk(info.fileID, path, startByteOffset, endByteOffset)
 		}
