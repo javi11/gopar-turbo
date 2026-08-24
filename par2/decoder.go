@@ -145,12 +145,18 @@ func makeChecksumShardLocationMap(sliceByteCount int, infos []decoderInputFileIn
 }
 
 type shardIntegrityInfo struct {
-	data      []byte
+	// present is true when the shard's bytes were located on disk. The
+	// bytes themselves are not retained: readShard re-reads them from
+	// foundAt when they are actually needed.
+	present bool
+	// foundAt is where the bytes actually live, which is not necessarily
+	// the shard's canonical offset.
+	foundAt   shardLocation
 	locations shardLocationSet
 }
 
 func (info shardIntegrityInfo) ok(location shardLocation) bool {
-	return len(info.data) != 0 && info.locations[location]
+	return info.present && info.locations[location]
 }
 
 type fileIntegrityInfo struct {
@@ -194,6 +200,10 @@ type Decoder struct {
 
 	numGoroutines int
 	scanPolicy    scanPolicy
+
+	// fileIDIndices maps a file ID to its index in recoverySet, so a shard
+	// can be traced back to the file its bytes live in.
+	fileIDIndices map[fileID]int
 
 	checksumToLocation checksumShardLocationMap
 
@@ -301,16 +311,16 @@ func newDecoder(fileIO fileIO, delegate DecoderDelegate, indexPath string, numGo
 	}
 
 	return &Decoder{
-		fileIO, delegate,
-		indexPath,
-		setID,
-		indexFile.clientID, indexFile.mainPacket.sliceByteCount,
-		recoverySet, nonRecoverySet,
-		numGoroutines,
-		policy,
-		nil,
-		nil,
-		nil,
+		fileIO:         fileIO,
+		delegate:       delegate,
+		indexPath:      indexPath,
+		setID:          setID,
+		clientID:       indexFile.clientID,
+		sliceByteCount: indexFile.mainPacket.sliceByteCount,
+		recoverySet:    recoverySet,
+		nonRecoverySet: nonRecoverySet,
+		numGoroutines:  numGoroutines,
+		scanPolicy:     policy,
 	}, nil
 }
 
@@ -410,10 +420,11 @@ func fillShardInfos(sliceByteCount int, data []byte, checksumToLocation checksum
 		for foundLocation := range foundLocations {
 			integrityInfo := fileIntegrityInfos[fileIDIndices[foundLocation.fileID]]
 			shardInfo := &integrityInfo.shardInfos[foundLocation.start/sliceByteCount]
-			if shardInfo.data == nil {
+			if !shardInfo.present {
 				*shardInfo = shardIntegrityInfo{
-					slice,
-					shardLocationSet{},
+					present:   true,
+					foundAt:   location,
+					locations: shardLocationSet{},
 				}
 			}
 			shardInfo.locations[location] = true
@@ -473,6 +484,7 @@ func (d *Decoder) LoadFileData() error {
 		}
 		fileIDIndices[info.fileID] = i
 	}
+	d.fileIDIndices = fileIDIndices
 
 	for i, info := range d.recoverySet {
 		path := d.getFilePath(info)
@@ -633,6 +645,48 @@ func (d *Decoder) LoadParityData() error {
 	return nil
 }
 
+// readShard fills buf with the bytes of the given shard, re-reading them from
+// wherever the scan found them. buf must be sliceByteCount long; a trailing
+// partial slice is zero-padded, matching sliceAndPadByteArray.
+func (d *Decoder) readShard(info shardIntegrityInfo, buf []byte) error {
+	if !info.present {
+		return errors.New("shard not present")
+	}
+	idx, ok := d.fileIDIndices[info.foundAt.fileID]
+	if !ok {
+		return errors.New("unknown file for shard")
+	}
+	path := d.getFilePath(d.recoverySet[idx])
+	r, size, closeFn, err := d.fileIO.OpenRead(path)
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+
+	for i := range buf {
+		buf[i] = 0
+	}
+	n := int64(len(buf))
+	if start := int64(info.foundAt.start); start+n > size {
+		n = size - start
+	}
+	if n <= 0 {
+		return nil
+	}
+	_, err = r.ReadAt(buf[:n], int64(info.foundAt.start))
+	return err
+}
+
+// shardBytes returns a freshly allocated copy of a shard's bytes. Callers that
+// loop should prefer readShard with a reused buffer.
+func (d *Decoder) shardBytes(info shardIntegrityInfo) ([]byte, error) {
+	buf := make([]byte, d.sliceByteCount)
+	if err := d.readShard(info, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
 func (d *Decoder) newCoderAndShards() (rsec16.Coder, [][]byte, error) {
 	if len(d.fileIntegrityInfos) == 0 {
 		return rsec16.Coder{}, nil, errors.New("no file integrity info")
@@ -645,7 +699,15 @@ func (d *Decoder) newCoderAndShards() (rsec16.Coder, [][]byte, error) {
 	var dataShards [][]byte
 	for _, info := range d.fileIntegrityInfos {
 		for _, shardInfo := range info.shardInfos {
-			dataShards = append(dataShards, shardInfo.data)
+			if !shardInfo.present {
+				dataShards = append(dataShards, nil)
+				continue
+			}
+			shard, err := d.shardBytes(shardInfo)
+			if err != nil {
+				return rsec16.Coder{}, nil, err
+			}
+			dataShards = append(dataShards, shard)
 		}
 	}
 	coder, err := rsec16.NewCoderPAR2Vandermonde(len(dataShards), len(d.parityShards), d.numGoroutines)
@@ -693,7 +755,7 @@ func (d *Decoder) ShardCounts() ShardCounts {
 
 	for _, info := range d.fileIntegrityInfos {
 		for _, shardInfo := range info.shardInfos {
-			if shardInfo.data == nil {
+			if !shardInfo.present {
 				unusableDataShardCount++
 			} else {
 				usableDataShardCount++
@@ -753,13 +815,17 @@ func (d *Decoder) Repair(checkParity bool) ([]string, error) {
 
 	wasOK := make([]bool, len(d.fileIntegrityInfos))
 
+	// shardOffsets[i] is where file i's shards begin in dataShards.
+	shardOffsets := make([]int, len(d.fileIntegrityInfos))
 	k := 0
 	for i, info := range d.fileIntegrityInfos {
 		wasOK[i] = info.ok(d.sliceByteCount)
+		shardOffsets[i] = k
 		shardCount := len(info.shardInfos)
 		for j, shard := range dataShards[k : k+shardCount] {
 			info.shardInfos[j] = shardIntegrityInfo{
-				data:      shard,
+				present:   true,
+				foundAt:   shardLocation{info.fileID, j * d.sliceByteCount},
 				locations: d.checksumToLocation.get(crc32.ChecksumIEEE(shard), shard),
 			}
 		}
@@ -775,9 +841,12 @@ func (d *Decoder) Repair(checkParity bool) ([]string, error) {
 			continue
 		}
 
+		// Write from the reconstructed shards directly: the integrity
+		// infos no longer carry payloads.
 		buf := bytes.NewBuffer(nil)
-		for _, shardInfo := range fileIntegrityInfo.shardInfos {
-			err := binary.Write(buf, binary.LittleEndian, shardInfo.data)
+		start := shardOffsets[i]
+		for j := range fileIntegrityInfo.shardInfos {
+			err := binary.Write(buf, binary.LittleEndian, dataShards[start+j])
 			if err != nil {
 				return repairedPaths, err
 			}
