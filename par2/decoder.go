@@ -1104,6 +1104,12 @@ func (d *Decoder) Repair(checkParity bool) ([]string, error) {
 		return nil, err
 	}
 
+	// Release every reader before committing: Windows refuses to rename over
+	// a file that is still open, and the cache holds the originals open for
+	// survivor reads. Nothing below needs it — checkWrittenFile opens the
+	// repaired file itself, and the parity check builds its own cache.
+	cache.Close()
+
 	// Close, then verify each rewritten file by streaming it back.
 	var repairedPaths []string
 	for i, inputFileInfo := range d.recoverySet {

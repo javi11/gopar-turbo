@@ -1,6 +1,7 @@
 package par2
 
 import (
+	"errors"
 	"io"
 	"path/filepath"
 	"sync"
@@ -192,4 +193,92 @@ func TestIncrementalRepairChunkedByteIdentical(t *testing.T) {
 	got, err := fs.ReadFile(filepath.Join(workingDir, "big.rar"))
 	require.NoError(t, err)
 	require.Equal(t, want, got)
+}
+
+// windowsLikeFileIO reproduces Windows rename semantics: committing a write to
+// a path fails while any reader of that path is still open. POSIX allows the
+// rename, so without this double the hazard is invisible on the dev machine
+// and only shows up in Windows CI.
+type windowsLikeFileIO struct {
+	fileIO
+	mu   sync.Mutex
+	open map[string]int
+}
+
+func newWindowsLikeFileIO(inner fileIO) *windowsLikeFileIO {
+	return &windowsLikeFileIO{fileIO: inner, open: map[string]int{}}
+}
+
+func (w *windowsLikeFileIO) OpenRead(path string) (io.ReaderAt, int64, func() error, error) {
+	r, size, closeFn, err := w.fileIO.OpenRead(path)
+	if err != nil {
+		return r, size, closeFn, err
+	}
+	w.mu.Lock()
+	w.open[path]++
+	w.mu.Unlock()
+
+	var once sync.Once
+	return r, size, func() error {
+		once.Do(func() {
+			w.mu.Lock()
+			w.open[path]--
+			w.mu.Unlock()
+		})
+		return closeFn()
+	}, nil
+}
+
+func (w *windowsLikeFileIO) OpenWrite(path string, size int64) (io.WriterAt, func(bool) error, error) {
+	writer, closeFn, err := w.fileIO.OpenWrite(path, size)
+	if err != nil {
+		return writer, closeFn, err
+	}
+	return writer, func(commit bool) error {
+		if commit {
+			w.mu.Lock()
+			n := w.open[path]
+			w.mu.Unlock()
+			if n > 0 {
+				return errors.New("access is denied: file still open")
+			}
+		}
+		return closeFn(commit)
+	}, nil
+}
+
+// Repair must not hold a reader on a file while committing its replacement.
+func TestRepairCommitsWithNoReadersOpen(t *testing.T) {
+	workingDir := memfs.RootDir()
+
+	t.Run("corrupted file", func(t *testing.T) {
+		fs := makeShiftTestMemFS(workingDir)
+		buildPAR2Data(t, fs, workingDir, 4, 2)
+		want := pristineBig(t, workingDir)
+		perturbFile(t, fs, "big.rar")
+
+		_, err := repair(newWindowsLikeFileIO(testFileIO{t, fs}),
+			filepath.Join(workingDir, "file.par2"), RepairOptions{})
+		require.NoError(t, err)
+
+		got, err := fs.ReadFile(filepath.Join(workingDir, "big.rar"))
+		require.NoError(t, err)
+		require.Equal(t, want, got)
+	})
+
+	t.Run("missing file", func(t *testing.T) {
+		fs := makeShiftTestMemFS(workingDir)
+		buildPAR2Data(t, fs, workingDir, 4, 10)
+		want := pristineBig(t, workingDir)
+		_, err := fs.RemoveFile(filepath.Join(workingDir, "big.rar"))
+		require.NoError(t, err)
+
+		_, err = repair(newWindowsLikeFileIO(testFileIO{t, fs}),
+			filepath.Join(workingDir, "file.par2"), RepairOptions{})
+		require.NoError(t, err)
+
+		got, err := fs.ReadFile(filepath.Join(workingDir, "big.rar"))
+		require.NoError(t, err)
+		require.Equal(t, want, got)
+	})
 }
