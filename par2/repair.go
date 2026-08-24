@@ -26,6 +26,20 @@ type RepairOptions struct {
 	// The RepairDelegate to use. If nil, DoNothingRepairDelegate
 	// is used.
 	RepairDelegate RepairDelegate
+	// If FindMisalignedData is true, a slice that matches no known
+	// shard triggers a byte-wise search for shards that sit off a
+	// slice boundary, as when data has been shifted by an insertion
+	// or deletion. This recovers sets that would otherwise need
+	// parity, but costs up to a full slice of byte-wise scanning per
+	// miss. par2cmdline exposes the same trade-off as -N.
+	//
+	// Defaults to false: a miss advances to the next slice boundary.
+	FindMisalignedData bool
+	// MisalignedSearchLimit bounds how far past a slice boundary the
+	// FindMisalignedData search slides before giving up on that
+	// slice. Zero means unbounded. Ignored when FindMisalignedData
+	// is false.
+	MisalignedSearchLimit int
 }
 
 // RepairResult holds the result of a Repair call.
@@ -58,7 +72,10 @@ func repair(fileIO fileIO, parPath string, options RepairOptions) (RepairResult,
 		numGoroutines = NumGoroutinesDefault()
 	}
 
-	decoder, err := newDecoder(fileIO, delegate, parPath, numGoroutines)
+	decoder, err := newDecoder(fileIO, delegate, parPath, numGoroutines, scanPolicy{
+		findMisaligned: options.FindMisalignedData,
+		searchLimit:    options.MisalignedSearchLimit,
+	})
 	if err != nil {
 		return RepairResult{}, err
 	}

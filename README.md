@@ -38,6 +38,26 @@ The API is shaped like gopar's: delegates for progress
 (`VerifyDelegate`, `RepairDelegate`), `NumGoroutines` options, and the same
 error semantics (`par2.RepairErrorMeansRepairNecessaryButNotPossible`).
 
+### Misaligned data
+
+When a slice matches no known shard, the scanner can fall back to a byte-wise
+rolling-CRC search that finds shards sitting *off* a slice boundary — the case
+where data has been shifted by an insertion or deletion. That search is
+expensive: every miss can slide up to a full slice before it resynchronises,
+which on a set with 2 MiB slices costs roughly 25× the scan time of an intact
+set. It is therefore **off by default**, matching par2cmdline's `-N` flag:
+
+```go
+par2.Verify("recovery.par2", par2.VerifyOptions{
+    FindMisalignedData:    true, // off by default
+    MisalignedSearchLimit: 64,   // 0 = unbounded (the historical behaviour)
+})
+```
+
+Leave it off for ordinary corruption and missing files, where damage is
+slice-aligned and parity does the work. Turn it on when a file may have been
+shifted rather than corrupted in place.
+
 ## The gf16 package (streaming consumers)
 
 `github.com/javi11/gopar-turbo/gf16` exposes the SIMD backend directly for

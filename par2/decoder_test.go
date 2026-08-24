@@ -49,12 +49,12 @@ func TestFillShardInfos(t *testing.T) {
 	dataByteCount := 50
 	id, data, checksumToLocation, fileIntegrityInfos, fileIDIndices, unrelatedData := makeTestFillShardInfoInputs(t, sliceByteCount, dataByteCount)
 
-	hits, misses := fillShardInfos(sliceByteCount, data, checksumToLocation, id, fileIntegrityInfos, fileIDIndices)
+	hits, misses := fillShardInfos(sliceByteCount, data, checksumToLocation, id, fileIntegrityInfos, fileIDIndices, scanPolicy{findMisaligned: true})
 	expectedHits := (dataByteCount + sliceByteCount - 1) / sliceByteCount
 	require.Equal(t, expectedHits, hits)
 	require.Equal(t, 0, misses)
 
-	hits, misses = fillShardInfos(sliceByteCount, unrelatedData, checksumToLocation, id, fileIntegrityInfos, fileIDIndices)
+	hits, misses = fillShardInfos(sliceByteCount, unrelatedData, checksumToLocation, id, fileIntegrityInfos, fileIDIndices, scanPolicy{findMisaligned: true})
 	require.Equal(t, 0, hits)
 	require.Equal(t, dataByteCount, misses)
 }
@@ -68,12 +68,12 @@ func BenchmarkFillShardInfos(b *testing.B) {
 
 	b.Run("related", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			fillShardInfos(sliceByteCount, data, checksumToLocation, id, fileIntegrityInfos, fileIDIndices)
+			fillShardInfos(sliceByteCount, data, checksumToLocation, id, fileIntegrityInfos, fileIDIndices, scanPolicy{findMisaligned: true})
 		}
 	})
 	b.Run("unrelated", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			fillShardInfos(sliceByteCount, unrelatedData, checksumToLocation, id, fileIntegrityInfos, fileIDIndices)
+			fillShardInfos(sliceByteCount, unrelatedData, checksumToLocation, id, fileIntegrityInfos, fileIDIndices, scanPolicy{findMisaligned: true})
 		}
 	})
 }
@@ -178,7 +178,7 @@ func buildPAR2Data(t *testing.T, fs memfs.MemFS, basePath string, sliceByteCount
 }
 
 func newDecoderForTest(t *testing.T, fs memfs.MemFS, indexPath string) (*Decoder, error) {
-	return newDecoder(testFileIO{t, fs}, testDecoderDelegate{t}, indexPath, rsec16.DefaultNumGoroutines())
+	return newDecoder(testFileIO{t, fs}, testDecoderDelegate{t}, indexPath, rsec16.DefaultNumGoroutines(), scanPolicy{findMisaligned: true})
 }
 
 func makeDecoderMemFS(workingDir string) memfs.MemFS {

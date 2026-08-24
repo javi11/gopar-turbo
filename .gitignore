@@ -1,2 +1,5 @@
 build/
 *.o
+
+# built benchmark binary
+/par2bench

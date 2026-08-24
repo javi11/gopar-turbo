@@ -170,6 +170,7 @@ type Decoder struct {
 	nonRecoverySet []decoderInputFileInfo
 
 	numGoroutines int
+	scanPolicy    scanPolicy
 
 	checksumToLocation checksumShardLocationMap
 
@@ -245,7 +246,7 @@ func (DoNothingDecoderDelegate) OnDetectDataFileWrongByteCount(fileID [16]byte, 
 // OnDataFileWrite implements the DecoderDelegate interface.
 func (DoNothingDecoderDelegate) OnDataFileWrite(i, n int, path string, byteCount int, err error) {}
 
-func newDecoder(fileIO fileIO, delegate DecoderDelegate, indexPath string, numGoroutines int) (*Decoder, error) {
+func newDecoder(fileIO fileIO, delegate DecoderDelegate, indexPath string, numGoroutines int, policy scanPolicy) (*Decoder, error) {
 	indexBytes, err := fileIO.ReadFile(indexPath)
 	if err != nil {
 		return nil, err
@@ -283,6 +284,7 @@ func newDecoder(fileIO fileIO, delegate DecoderDelegate, indexPath string, numGo
 		indexFile.clientID, indexFile.mainPacket.sliceByteCount,
 		recoverySet, nonRecoverySet,
 		numGoroutines,
+		policy,
 		nil,
 		nil,
 		nil,
@@ -309,13 +311,40 @@ func sliceAndPadByteArray(bs []byte, start, end int) []byte {
 	return slice
 }
 
-func fillShardInfos(sliceByteCount int, data []byte, checksumToLocation checksumShardLocationMap, fileID fileID, fileIntegrityInfos []fileIntegrityInfo, fileIDIndices map[fileID]int) (int, int) {
+// scanPolicy controls how the scanner reacts to a slice-aligned chunk that
+// matches no known shard checksum.
+type scanPolicy struct {
+	// findMisaligned enables the byte-wise rolling-CRC32 search that locates
+	// shards sitting off a slice boundary (data shifted by an insertion or
+	// deletion). It is expensive: every miss can slide up to a whole slice
+	// before the scan resynchronises. When false, a miss simply advances to
+	// the next slice boundary.
+	//
+	// par2cmdline exposes the same trade-off as its -N flag, off by default.
+	findMisaligned bool
+
+	// searchLimit bounds how far the byte-wise search slides past a slice
+	// boundary before giving up on that slice. Zero means unbounded, which
+	// is what findMisaligned alone has always meant.
+	searchLimit int
+}
+
+// defaultScanPolicy skips the misaligned-data search, matching par2cmdline's
+// default. Callers that need it opt in explicitly.
+func defaultScanPolicy() scanPolicy {
+	return scanPolicy{}
+}
+
+func fillShardInfos(sliceByteCount int, data []byte, checksumToLocation checksumShardLocationMap, fileID fileID, fileIntegrityInfos []fileIntegrityInfo, fileIDIndices map[fileID]int, policy scanPolicy) (int, int) {
 	hits := 0
 	misses := 0
 
 	justMissed := false
 	window := newCRC32Window(sliceByteCount)
 	var crcSlice uint32
+	// slideStart is the slice boundary the current byte-wise search began
+	// from. Only meaningful while justMissed is true.
+	slideStart := 0
 	for j := 0; j < len(data); {
 		slice := sliceAndPadByteArray(data, j, j+sliceByteCount)
 		if justMissed {
@@ -325,8 +354,31 @@ func fillShardInfos(sliceByteCount int, data []byte, checksumToLocation checksum
 		}
 		foundLocations := checksumToLocation.get(crcSlice, slice)
 		if len(foundLocations) == 0 {
-			j++
 			misses++
+
+			// Without the misaligned search, a miss just means this
+			// slice is damaged; move on to the next boundary.
+			if !policy.findMisaligned {
+				j += sliceByteCount
+				justMissed = false
+				continue
+			}
+
+			if !justMissed {
+				slideStart = j
+			}
+			j++
+
+			// Give up on this slice once the search has slid past the
+			// caller's limit, and resume from the next boundary. The
+			// rolling window is no longer contiguous after the jump, so
+			// the next CRC must be computed from scratch.
+			if policy.searchLimit > 0 && j-slideStart >= policy.searchLimit {
+				j = slideStart + sliceByteCount
+				justMissed = false
+				continue
+			}
+
 			justMissed = true
 			continue
 		}
@@ -368,7 +420,7 @@ func (d *Decoder) fillFileIntegrityInfos(checksumToLocation checksumShardLocatio
 		return len(data), 0, 0, err
 	}
 
-	hits, misses := fillShardInfos(d.sliceByteCount, data, checksumToLocation, info.fileID, fileIntegrityInfos, fileIDIndices)
+	hits, misses := fillShardInfos(d.sliceByteCount, data, checksumToLocation, info.fileID, fileIntegrityInfos, fileIDIndices, d.scanPolicy)
 
 	hashMismatch := sixteenKHash(data) != info.sixteenKHash || md5.Sum(data) != info.hash
 	fileIntegrityInfos[i].hashMismatch = hashMismatch
@@ -734,5 +786,5 @@ func (d *Decoder) Repair(checkParity bool) ([]string, error) {
 // NewDecoder reads the given index file, which usually has a .par2
 // extension.
 func NewDecoder(delegate DecoderDelegate, indexFile string, numGoroutines int) (*Decoder, error) {
-	return newDecoder(defaultFileIO{}, delegate, indexFile, numGoroutines)
+	return newDecoder(defaultFileIO{}, delegate, indexFile, numGoroutines, defaultScanPolicy())
 }
