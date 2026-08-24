@@ -105,10 +105,20 @@ func foldInputsGF16(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, 
 		}
 	}
 
-	// Split each accumulator into stride-aligned ranges so rows x ranges
-	// comfortably exceeds the worker count, mirroring applyMatrixGF16.
-	perRange, numRanges := calculateParallelParams(
-		bufSize, (numGoroutines+len(out)-1)/len(out), stride, stride)
+	// Split each accumulator into stride-aligned ranges sized so one batch's
+	// source ranges (B x perRange) fit in cache: units are dispatched
+	// range-major, so every accumulator's unit for a range reuses the same
+	// hot source bytes instead of re-streaming the whole batch from DRAM
+	// per accumulator.
+	const targetRange = 128 << 10
+	perRange := targetRange - targetRange%stride
+	if perRange < stride {
+		perRange = stride
+	}
+	if perRange > bufSize {
+		perRange = bufSize
+	}
+	numRanges := (bufSize + perRange - 1) / perRange
 
 	// Long-lived workers on a persistent channel; the per-batch barrier is a
 	// WaitGroup counting units, so workers and contexts survive across
@@ -178,16 +188,16 @@ func foldInputsGF16(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, 
 		}(banks[k^1])
 
 		var batchDone sync.WaitGroup
-		for i := range accs {
-			for r := 0; r < numRanges; r++ {
-				offset := r * perRange
-				length := perRange
-				if offset+length > bufSize {
-					length = bufSize - offset
-				}
-				if length <= 0 {
-					continue
-				}
+		for r := 0; r < numRanges; r++ {
+			offset := r * perRange
+			length := perRange
+			if offset+length > bufSize {
+				length = bufSize - offset
+			}
+			if length <= 0 {
+				continue
+			}
+			for i := range accs {
 				batchDone.Add(1)
 				units <- foldUnit{acc: accs[i], offset: offset, length: length,
 					srcs: banks[k][:n], coeffs: coeffs[i], done: &batchDone}

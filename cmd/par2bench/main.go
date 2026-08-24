@@ -41,6 +41,7 @@ func main() {
 	findMisaligned := flag.Bool("find-misaligned", false, "search for shards that sit off a slice boundary (par2cmdline -N)")
 	searchLimit := flag.Int("misaligned-limit", 0, "bound the misaligned search slide; 0 = unbounded")
 	memProfile := flag.String("memprofile", "", "write an in-use heap profile to this path")
+	cpuProfile := flag.String("cpuprofile", "", "write a CPU profile to this path")
 	flag.Parse()
 
 	if *parPath == "" {
@@ -62,6 +63,14 @@ func main() {
 	}
 	if r.NumGoroutines == 0 {
 		r.NumGoroutines = par2.NumGoroutinesDefault()
+	}
+
+	if *cpuProfile != "" {
+		f, ferr := os.Create(*cpuProfile)
+		if ferr == nil {
+			_ = pprof.StartCPUProfile(f)
+			defer pprof.StopCPUProfile()
+		}
 	}
 
 	start := time.Now()
