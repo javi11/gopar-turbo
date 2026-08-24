@@ -211,6 +211,9 @@ type Decoder struct {
 	fileIntegrityInfos []fileIntegrityInfo
 
 	parityShards [][]byte
+	// parityPresent[i] records that parity shard i exists, even when its
+	// bytes were not retained.
+	parityPresent []bool
 }
 
 // DecoderDelegate holds methods that are called during the decode
@@ -368,7 +371,19 @@ func defaultScanPolicy() scanPolicy {
 	return scanPolicy{}
 }
 
+// fillShardInfos scans a whole buffer. It is kept for tests and for callers
+// that already hold the entire file.
 func fillShardInfos(sliceByteCount int, data []byte, checksumToLocation checksumShardLocationMap, fileID fileID, fileIntegrityInfos []fileIntegrityInfo, fileIDIndices map[fileID]int, policy scanPolicy) (int, int) {
+	_, hits, misses := scanBuffer(sliceByteCount, data, len(data), 0, checksumToLocation, fileID, fileIntegrityInfos, fileIDIndices, policy)
+	return hits, misses
+}
+
+// scanBuffer scans buf for known shards, treating baseOffset as the file
+// offset of buf[0]. It keeps scanning while the cursor is below limit, so a
+// caller streaming a file can set limit short of the end and carry the
+// remainder into the next window. It returns the cursor position where it
+// stopped, plus hit and miss counts.
+func scanBuffer(sliceByteCount int, data []byte, limit, baseOffset int, checksumToLocation checksumShardLocationMap, fileID fileID, fileIntegrityInfos []fileIntegrityInfo, fileIDIndices map[fileID]int, policy scanPolicy) (int, int, int) {
 	hits := 0
 	misses := 0
 
@@ -378,7 +393,8 @@ func fillShardInfos(sliceByteCount int, data []byte, checksumToLocation checksum
 	// slideStart is the slice boundary the current byte-wise search began
 	// from. Only meaningful while justMissed is true.
 	slideStart := 0
-	for j := 0; j < len(data); {
+	j := 0
+	for j < limit {
 		slice := sliceAndPadByteArray(data, j, j+sliceByteCount)
 		if justMissed {
 			crcSlice = window.update(crcSlice, data[j-1], slice[len(slice)-1])
@@ -416,7 +432,7 @@ func fillShardInfos(sliceByteCount int, data []byte, checksumToLocation checksum
 			continue
 		}
 
-		location := shardLocation{fileID, j}
+		location := shardLocation{fileID, baseOffset + j}
 		for foundLocation := range foundLocations {
 			integrityInfo := fileIntegrityInfos[fileIDIndices[foundLocation.fileID]]
 			shardInfo := &integrityInfo.shardInfos[foundLocation.start/sliceByteCount]
@@ -435,7 +451,7 @@ func fillShardInfos(sliceByteCount int, data []byte, checksumToLocation checksum
 		hits++
 	}
 
-	return hits, misses
+	return j, hits, misses
 }
 
 func (d *Decoder) getFilePath(info decoderInputFileInfo) string {
@@ -444,31 +460,103 @@ func (d *Decoder) getFilePath(info decoderInputFileInfo) string {
 	return filepath.Join(basePath, info.filename)
 }
 
+// scanWindowSize returns the buffer size for the streaming scan. It is a whole
+// number of slices, at least two so the misaligned search can slide a full
+// slice past a boundary without re-reading, and at least a megabyte so reads
+// stay efficient when slices are small.
+func scanWindowSize(sliceByteCount int) int {
+	const minWindow = 1 << 20
+	slices := 2
+	if n := minWindow/sliceByteCount + 1; n > slices {
+		slices = n
+	}
+	return slices * sliceByteCount
+}
+
 func (d *Decoder) fillFileIntegrityInfos(checksumToLocation checksumShardLocationMap, fileIntegrityInfos []fileIntegrityInfo, fileIDIndices map[fileID]int, i int, info decoderInputFileInfo) (int, int, int, error) {
 	path := d.getFilePath(info)
-	data, err := d.fileIO.ReadFile(path)
+	r, size, closeFn, err := d.fileIO.OpenRead(path)
 	if os.IsNotExist(err) {
 		fileIntegrityInfos[i].missing = true
 		return 0, 0, 0, nil
 	} else if err != nil {
-		return len(data), 0, 0, err
+		return 0, 0, 0, err
+	}
+	defer closeFn()
+
+	windowSize := scanWindowSize(d.sliceByteCount)
+	buf := make([]byte, windowSize)
+
+	fullHash := md5.New()
+	head := make([]byte, 0, 16*1024)
+
+	hits, misses := 0, 0
+	carry := 0           // bytes retained at the front of buf from the last window
+	var readOffset int64 // next unread byte in the file
+	windowStart := 0     // file offset of buf[0]
+
+	for {
+		n := windowSize - carry
+		if remaining := size - readOffset; int64(n) > remaining {
+			n = int(remaining)
+		}
+		if n > 0 {
+			if _, err := r.ReadAt(buf[carry:carry+n], readOffset); err != nil {
+				return int(size), hits, misses, err
+			}
+			fullHash.Write(buf[carry : carry+n])
+			if len(head) < cap(head) {
+				head = append(head, buf[carry : carry+n][:min(n, cap(head)-len(head))]...)
+			}
+			readOffset += int64(n)
+		}
+
+		window := buf[:carry+n]
+		if len(window) == 0 {
+			break
+		}
+
+		atEOF := readOffset >= size
+		limit := len(window)
+		if !atEOF {
+			limit -= d.sliceByteCount
+			if limit < 0 {
+				limit = 0
+			}
+		}
+
+		consumed, h, m := scanBuffer(d.sliceByteCount, window, limit, windowStart,
+			checksumToLocation, info.fileID, fileIntegrityInfos, fileIDIndices, d.scanPolicy)
+		hits += h
+		misses += m
+
+		if atEOF {
+			break
+		}
+
+		// Carry the unscanned tail to the front of the next window.
+		carry = len(window) - consumed
+		copy(buf, window[consumed:])
+		windowStart += consumed
 	}
 
-	hits, misses := fillShardInfos(d.sliceByteCount, data, checksumToLocation, info.fileID, fileIntegrityInfos, fileIDIndices, d.scanPolicy)
+	var full [md5.Size]byte
+	copy(full[:], fullHash.Sum(nil))
+	sixteenK := md5.Sum(head)
 
-	hashMismatch := sixteenKHash(data) != info.sixteenKHash || md5.Sum(data) != info.hash
+	hashMismatch := sixteenK != info.sixteenKHash || full != info.hash
 	fileIntegrityInfos[i].hashMismatch = hashMismatch
 	if hashMismatch {
 		d.delegate.OnDetectDataFileHashMismatch(info.fileID, path)
 	}
 
-	hasWrongByteCount := len(data) != info.byteCount
+	hasWrongByteCount := int(size) != info.byteCount
 	fileIntegrityInfos[i].hasWrongByteCount = hasWrongByteCount
 	if hasWrongByteCount {
 		d.delegate.OnDetectDataFileWrongByteCount(info.fileID, path)
 	}
 
-	return len(data), hits, misses, nil
+	return int(size), hits, misses, nil
 }
 
 // LoadFileData loads existing file data into memory.
@@ -581,6 +669,17 @@ func (recoveryDelegate) OnDataFileWrite(i, n int, path string, byteCount int, er
 // LoadParityData searches for parity volumes and loads them into
 // memory.
 func (d *Decoder) LoadParityData() error {
+	return d.loadParityData(true)
+}
+
+// LoadParityPresence records which parity shards exist without retaining their
+// bytes. That is all verification needs, and it keeps verify memory
+// independent of the size of the recovery set.
+func (d *Decoder) LoadParityPresence() error {
+	return d.loadParityData(false)
+}
+
+func (d *Decoder) loadParityData(retain bool) error {
 	ext := path.Ext(d.indexPath)
 	base := d.indexPath[:len(d.indexPath)-len(ext)]
 	matches, err := d.fileIO.FindWithPrefixAndSuffix(base+".", ext)
@@ -588,7 +687,8 @@ func (d *Decoder) LoadParityData() error {
 		return err
 	}
 
-	var parityFiles []file
+	var parityPresent []bool
+	var parityShards [][]byte
 	for i, match := range matches {
 		parityFile, err := func() (*file, error) {
 			volumeBytes, err := d.fileIO.ReadFile(match)
@@ -628,19 +728,24 @@ func (d *Decoder) LoadParityData() error {
 			continue
 		}
 
-		parityFiles = append(parityFiles, *parityFile)
-	}
-
-	var parityShards [][]byte
-	for _, file := range parityFiles {
-		for exponent, packet := range file.recoveryPackets {
-			if int(exponent) >= len(parityShards) {
-				parityShards = append(parityShards, make([][]byte, int(exponent+1)-len(parityShards))...)
+		for exponent, packet := range parityFile.recoveryPackets {
+			if int(exponent) >= len(parityPresent) {
+				grow := int(exponent+1) - len(parityPresent)
+				parityPresent = append(parityPresent, make([]bool, grow)...)
+				parityShards = append(parityShards, make([][]byte, grow)...)
 			}
-			parityShards[exponent] = packet.data
+			parityPresent[exponent] = true
+			if retain {
+				// Copy out of the volume buffer so the buffer itself can be
+				// collected instead of being pinned by this subslice.
+				shard := make([]byte, len(packet.data))
+				copy(shard, packet.data)
+				parityShards[exponent] = shard
+			}
 		}
 	}
 
+	d.parityPresent = parityPresent
 	d.parityShards = parityShards
 	return nil
 }
@@ -766,11 +871,11 @@ func (d *Decoder) ShardCounts() ShardCounts {
 	usableParityShardCount := 0
 	unusableParityShardCount := 0
 
-	for _, shard := range d.parityShards {
-		if shard == nil {
-			unusableParityShardCount++
-		} else {
+	for _, present := range d.parityPresent {
+		if present {
 			usableParityShardCount++
+		} else {
+			unusableParityShardCount++
 		}
 	}
 

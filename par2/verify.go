@@ -77,7 +77,7 @@ func verify(fileIO fileIO, parPath string, options VerifyOptions) (VerifyResult,
 		return VerifyResult{}, err
 	}
 
-	err = decoder.LoadParityData()
+	err = decoder.LoadParityPresence()
 	if err != nil {
 		return VerifyResult{}, err
 	}
