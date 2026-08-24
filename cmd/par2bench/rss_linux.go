@@ -2,4 +2,14 @@
 
 package main
 
-func maxRSSToBytes(v int64) int64 { return v * 1024 }
+import "syscall"
+
+// peakRSS returns the process's maximum resident set size in bytes. Linux
+// reports ru_maxrss in kilobytes.
+func peakRSS() int64 {
+	var ru syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
+		return 0
+	}
+	return int64(ru.Maxrss) * 1024
+}
