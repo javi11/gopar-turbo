@@ -58,6 +58,27 @@ Leave it off for ordinary corruption and missing files, where damage is
 slice-aligned and parity does the work. Turn it on when a file may have been
 shifted rather than corrupted in place.
 
+### Memory
+
+Verify streams: it walks each file through a small sliding window and records
+only which shards are present, so its memory does not grow with the set. On a
+4.36 GiB release the scan itself costs the same as on a 1 GiB one.
+
+Repair reconstructs by folding one input shard at a time into an accumulator
+per *missing* shard, re-reading survivors from disk rather than holding the
+set. `MemoryBudget` bounds that further — when one accumulator per missing
+shard would exceed it, repair splits slices into byte ranges and makes several
+passes over the inputs:
+
+```go
+par2.Repair("recovery.par2", par2.RepairOptions{
+    MemoryBudget: 512 << 20, // 0 = half of physical memory, like par2cmdline -m
+})
+```
+
+The trade is one extra pass over the data in exchange for bounded memory,
+which is the same trade par2cmdline makes.
+
 ## The gf16 package (streaming consumers)
 
 `github.com/javi11/gopar-turbo/gf16` exposes the SIMD backend directly for

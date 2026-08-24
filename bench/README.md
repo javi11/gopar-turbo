@@ -41,6 +41,21 @@ kernel. For kernel-level throughput see `go test ./rsec16/ -bench .`.
   baseline. A repair that finishes fast but produces wrong bytes shows up as
   `md5=MISMATCH`, not as a win.
 
+## A caveat about "pristine"
+
+The driver treats `--pristine` as ground truth and MD5-compares repaired output
+against it. Confirm the set actually verifies clean before trusting a run — a
+real Usenet download often arrives with article loss, and a baseline taken from
+damaged files scores every *correct* repair as a mismatch:
+
+```bash
+par2 verify pristine/recovery.par2   # must say repair is not required
+```
+
+Backup files are already excluded from the comparison: par2cmdline renames a
+damaged file to `<name>.1` before rewriting it, and counting those as set
+members produced the same false mismatch.
+
 ## Running it
 
 ```bash
