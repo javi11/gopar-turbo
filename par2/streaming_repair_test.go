@@ -108,3 +108,24 @@ func TestStreamingRepairDeletedFileWithoutEnoughParity(t *testing.T) {
 	require.True(t, RepairErrorMeansRepairNecessaryButNotPossible(err),
 		"expected a repair-not-possible error, got %v", err)
 }
+
+// The default accumulator footprint is capped: on a set where one accumulator
+// per missing shard would exceed the cap, chunkSizeFor must split slices even
+// with no explicit budget.
+func TestChunkSizeForCapsDefaultFootprint(t *testing.T) {
+	sliceByteCount := 2380956
+	missing := 210 // the benchmark set's repair-missing shape: ~504 MB uncapped
+
+	chunk := chunkSizeFor(0, sliceByteCount, missing)
+	require.Less(t, chunk, sliceByteCount,
+		"default must chunk when uncapped accumulators exceed the cap")
+	require.LessOrEqual(t, chunk*missing, foldAccumulatorCap)
+	require.Zero(t, chunk%2, "gf16 requires even sizes")
+
+	// An explicit budget below the cap still wins.
+	tight := chunkSizeFor(1<<20, sliceByteCount, missing)
+	require.LessOrEqual(t, tight*missing, 1<<20)
+
+	// Small sets stay single-pass.
+	require.Equal(t, 4096, chunkSizeFor(0, 4096, 10))
+}

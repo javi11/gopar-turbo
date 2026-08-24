@@ -41,7 +41,8 @@ type RepairOptions struct {
 	// is false.
 	MisalignedSearchLimit int
 	// MemoryBudget caps the bytes held for reconstruction accumulators.
-	// Zero selects half of physical memory, matching par2cmdline's -m.
+	// Zero selects a default capped at 256 MB; chunked passes at that size
+	// are measured to cost no wall-clock, so larger values buy nothing.
 	// When the budget is smaller than one accumulator per missing shard,
 	// repair splits slices into byte ranges and makes several passes over
 	// the inputs rather than exceeding it.

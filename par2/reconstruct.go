@@ -124,6 +124,12 @@ type reconstructionPlan struct {
 	inputs      []foldInput
 }
 
+// foldAccumulatorCap bounds the default accumulator footprint during
+// reconstruction. Chunked passes at this size are measured to cost no
+// wall-clock (two passes on the benchmark set ran as fast as one), so a
+// larger MemoryBudget buys nothing and the cap applies regardless.
+const foldAccumulatorCap = 256 << 20
+
 // chunkSizeFor returns the byte range of each slice to reconstruct per pass so
 // that one accumulator per missing shard fits inside budget. The result is
 // always even, which is all gf16 requires, and never exceeds a whole slice.
@@ -133,6 +139,9 @@ func chunkSizeFor(budget, sliceByteCount, missing int) int {
 	}
 	if budget <= 0 {
 		budget = defaultMemoryBudget()
+	}
+	if budget > foldAccumulatorCap {
+		budget = foldAccumulatorCap
 	}
 	per := budget / missing
 	if per >= sliceByteCount {
