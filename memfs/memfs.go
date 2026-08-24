@@ -2,6 +2,7 @@ package memfs
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -141,4 +142,28 @@ func (fs MemFS) OpenRead(path string) (io.ReaderAt, int64, func() error, error) 
 		return nil, 0, nil, err
 	}
 	return bytes.NewReader(data), int64(len(data)), func() error { return nil }, nil
+}
+
+// memWriter writes into a fixed-size buffer that replaces the file's contents
+// on close.
+type memWriter struct {
+	fs   MemFS
+	path string
+	data []byte
+}
+
+func (w *memWriter) WriteAt(p []byte, off int64) (int, error) {
+	if off < 0 || off+int64(len(p)) > int64(len(w.data)) {
+		return 0, errors.New("memfs: write out of range")
+	}
+	copy(w.data[off:], p)
+	return len(p), nil
+}
+
+// OpenWrite creates or truncates the file at path at the given size. Writes
+// land in a private buffer that replaces the file's contents on close, so a
+// concurrent reader of the old contents is unaffected.
+func (fs MemFS) OpenWrite(path string, size int64) (io.WriterAt, func() error, error) {
+	w := &memWriter{fs: fs, path: path, data: make([]byte, size)}
+	return w, func() error { return fs.WriteFile(w.path, w.data) }, nil
 }

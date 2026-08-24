@@ -28,6 +28,11 @@ type fileIO interface {
 	// this package satisfy it: Go requires identical method signatures for
 	// interface satisfaction.
 	OpenRead(path string) (io.ReaderAt, int64, func() error, error)
+	// OpenWrite creates or truncates path at the given size and returns a
+	// positional writer plus a close function the caller must invoke. It
+	// lets repair write reconstructed chunk ranges directly to their final
+	// offsets instead of assembling whole files in memory.
+	OpenWrite(path string, size int64) (io.WriterAt, func() error, error)
 	FindWithPrefixAndSuffix(prefix, suffix string) ([]string, error)
 	WriteFile(path string, data []byte) error
 }
@@ -49,6 +54,18 @@ func (defaultFileIO) OpenRead(path string) (io.ReaderAt, int64, func() error, er
 		return nil, 0, nil, err
 	}
 	return f, fi.Size(), f.Close, nil
+}
+
+func (defaultFileIO) OpenWrite(path string, size int64) (io.WriterAt, func() error, error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := f.Truncate(size); err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	return f, f.Close, nil
 }
 
 func (io defaultFileIO) FindWithPrefixAndSuffix(prefix, suffix string) ([]string, error) {

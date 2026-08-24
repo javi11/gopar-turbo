@@ -49,3 +49,52 @@ func TestDefaultFileIOOpenRead(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte{7, 6}, buf)
 }
+
+func TestMemFSOpenWritePositional(t *testing.T) {
+	dir := memfs.RootDir()
+	fs := memfs.MakeMemFS(dir, map[string][]byte{})
+	path := filepath.Join(dir, "out.bin")
+
+	w, closeFn, err := fs.OpenWrite(path, 8)
+	require.NoError(t, err)
+	_, err = w.WriteAt([]byte{5, 6}, 4) // out of order on purpose
+	require.NoError(t, err)
+	_, err = w.WriteAt([]byte{1, 2}, 0)
+	require.NoError(t, err)
+	require.NoError(t, closeFn())
+
+	got, err := fs.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, []byte{1, 2, 0, 0, 5, 6, 0, 0}, got)
+}
+
+func TestMemFSOpenWriteTruncatesExisting(t *testing.T) {
+	dir := memfs.RootDir()
+	fs := memfs.MakeMemFS(dir, map[string][]byte{"out.bin": {9, 9, 9, 9, 9, 9}})
+	path := filepath.Join(dir, "out.bin")
+
+	w, closeFn, err := fs.OpenWrite(path, 3)
+	require.NoError(t, err)
+	_, err = w.WriteAt([]byte{1}, 0)
+	require.NoError(t, err)
+	require.NoError(t, closeFn())
+
+	got, err := fs.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, []byte{1, 0, 0}, got)
+}
+
+func TestDefaultFileIOOpenWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.bin")
+
+	w, closeFn, err := defaultFileIO{}.OpenWrite(path, 4)
+	require.NoError(t, err)
+	_, err = w.WriteAt([]byte{7, 8}, 2)
+	require.NoError(t, err)
+	require.NoError(t, closeFn())
+
+	got, err := defaultFileIO{}.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0, 0, 7, 8}, got)
+}

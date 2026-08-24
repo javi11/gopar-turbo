@@ -102,6 +102,15 @@ func (io testFileIO) OpenRead(path string) (r stdio.ReaderAt, size int64, closeF
 	return io.fileIO.OpenRead(path)
 }
 
+func (io testFileIO) OpenWrite(path string, size int64) (w stdio.WriterAt, closeFn func() error, err error) {
+	io.t.Helper()
+	defer func() {
+		io.t.Helper()
+		io.t.Logf("OpenWrite(%s, %d) => %v", path, size, err)
+	}()
+	return io.fileIO.OpenWrite(path, size)
+}
+
 func (io testFileIO) FindWithPrefixAndSuffix(prefix, suffix string) (matches []string, err error) {
 	io.t.Helper()
 	defer func() {
