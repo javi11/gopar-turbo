@@ -78,14 +78,17 @@ func verify(fileIO fileIO, parPath string, options VerifyOptions) (VerifyResult,
 		return VerifyResult{}, err
 	}
 
-	err = decoder.LoadFileData()
-	if err != nil {
+	// The scan and the parity load touch disjoint files and disjoint
+	// decoder fields; running them concurrently hides the shorter phase
+	// entirely.
+	scanErr := make(chan error, 1)
+	go func() { scanErr <- decoder.LoadFileData() }()
+	parityErr := decoder.LoadParityPresence()
+	if err := <-scanErr; err != nil {
 		return VerifyResult{}, err
 	}
-
-	err = decoder.LoadParityPresence()
-	if err != nil {
-		return VerifyResult{}, err
+	if parityErr != nil {
+		return VerifyResult{}, parityErr
 	}
 
 	return VerifyResult{

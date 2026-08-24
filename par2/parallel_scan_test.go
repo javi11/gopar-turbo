@@ -97,3 +97,25 @@ func TestParallelScanRepairIdentical(t *testing.T) {
 
 	require.Equal(t, run(1), run(8))
 }
+
+// Verify and repair results must be unchanged with the scan and parity-load
+// phases overlapped.
+func TestOverlappedPhasesMatchSequential(t *testing.T) {
+	workingDir := memfs.RootDir()
+	fs := makeManyFilesMemFS(workingDir, 8, 40)
+	buildPAR2Data(t, fs, workingDir, 4, 3)
+	perturbFile(t, fs, "part02.bin")
+
+	vr, err := verify(testFileIO{t, fs}, filepath.Join(workingDir, "file.par2"), VerifyOptions{})
+	require.NoError(t, err)
+	require.True(t, vr.ShardCounts.RepairNeeded())
+	require.True(t, vr.ShardCounts.RepairPossible())
+	require.Equal(t, 3, vr.ShardCounts.UsableParityShardCount)
+
+	_, err = repair(testFileIO{t, fs}, filepath.Join(workingDir, "file.par2"), RepairOptions{})
+	require.NoError(t, err)
+
+	vr, err = verify(testFileIO{t, fs}, filepath.Join(workingDir, "file.par2"), VerifyOptions{})
+	require.NoError(t, err)
+	require.False(t, vr.ShardCounts.RepairNeeded())
+}

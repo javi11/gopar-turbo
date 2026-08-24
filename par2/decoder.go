@@ -226,7 +226,8 @@ type Decoder struct {
 }
 
 // DecoderDelegate holds methods that are called during the decode
-// process.
+// process. Callbacks may arrive from concurrent phases (the data scan and
+// the parity load overlap); implementations must be safe for concurrent use.
 type DecoderDelegate interface {
 	OnCreatorPacketLoad(clientID string)
 	OnMainPacketLoad(sliceByteCount, recoverySetCount, nonRecoverySetCount int)

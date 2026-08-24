@@ -86,14 +86,17 @@ func repair(fileIO fileIO, parPath string, options RepairOptions) (RepairResult,
 		return RepairResult{}, err
 	}
 
-	err = decoder.LoadFileData()
-	if err != nil {
+	// The scan and the parity load touch disjoint files and disjoint
+	// decoder fields; running them concurrently hides the shorter phase
+	// entirely.
+	scanErr := make(chan error, 1)
+	go func() { scanErr <- decoder.LoadFileData() }()
+	parityErr := decoder.LoadParityData()
+	if err := <-scanErr; err != nil {
 		return RepairResult{}, err
 	}
-
-	err = decoder.LoadParityData()
-	if err != nil {
-		return RepairResult{}, err
+	if parityErr != nil {
+		return RepairResult{}, parityErr
 	}
 
 	repairedPaths, err := decoder.Repair(options.DoubleCheck)
