@@ -42,6 +42,7 @@ func main() {
 	searchLimit := flag.Int("misaligned-limit", 0, "bound the misaligned search slide; 0 = unbounded")
 	memProfile := flag.String("memprofile", "", "write an in-use heap profile to this path")
 	cpuProfile := flag.String("cpuprofile", "", "write a CPU profile to this path")
+	memoryBudget := flag.Int("memory-budget", 0, "MemoryBudget in bytes (0 = library default)")
 	flag.Parse()
 
 	if *parPath == "" {
@@ -94,6 +95,7 @@ func main() {
 			DoubleCheck:           *doubleCheck,
 			FindMisalignedData:    *findMisaligned,
 			MisalignedSearchLimit: *searchLimit,
+			MemoryBudget:          *memoryBudget,
 		})
 		r.RepairedPaths = rr.RepairedPaths
 	default:
