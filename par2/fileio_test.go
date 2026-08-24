@@ -1,6 +1,7 @@
 package par2
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -61,7 +62,7 @@ func TestMemFSOpenWritePositional(t *testing.T) {
 	require.NoError(t, err)
 	_, err = w.WriteAt([]byte{1, 2}, 0)
 	require.NoError(t, err)
-	require.NoError(t, closeFn())
+	require.NoError(t, closeFn(true))
 
 	got, err := fs.ReadFile(path)
 	require.NoError(t, err)
@@ -77,7 +78,7 @@ func TestMemFSOpenWriteTruncatesExisting(t *testing.T) {
 	require.NoError(t, err)
 	_, err = w.WriteAt([]byte{1}, 0)
 	require.NoError(t, err)
-	require.NoError(t, closeFn())
+	require.NoError(t, closeFn(true))
 
 	got, err := fs.ReadFile(path)
 	require.NoError(t, err)
@@ -92,9 +93,78 @@ func TestDefaultFileIOOpenWrite(t *testing.T) {
 	require.NoError(t, err)
 	_, err = w.WriteAt([]byte{7, 8}, 2)
 	require.NoError(t, err)
-	require.NoError(t, closeFn())
+	require.NoError(t, closeFn(true))
 
 	got, err := defaultFileIO{}.ReadFile(path)
 	require.NoError(t, err)
 	require.Equal(t, []byte{0, 0, 7, 8}, got)
+}
+
+// close(false) must leave the original untouched: repair relies on this to
+// abort without corrupting a target file.
+func TestOpenWriteDiscardLeavesOriginal(t *testing.T) {
+	t.Run("defaultFileIO", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "keep.bin")
+		require.NoError(t, defaultFileIO{}.WriteFile(path, []byte{1, 2, 3}))
+
+		w, closeFn, err := defaultFileIO{}.OpenWrite(path, 3)
+		require.NoError(t, err)
+		_, err = w.WriteAt([]byte{9, 9, 9}, 0)
+		require.NoError(t, err)
+		require.NoError(t, closeFn(false))
+
+		got, err := defaultFileIO{}.ReadFile(path)
+		require.NoError(t, err)
+		require.Equal(t, []byte{1, 2, 3}, got)
+
+		// No temp file left behind.
+		entries, err := os.ReadDir(dir)
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+	})
+
+	t.Run("memfs", func(t *testing.T) {
+		dir := memfs.RootDir()
+		fs := memfs.MakeMemFS(dir, map[string][]byte{"keep.bin": {1, 2, 3}})
+		path := filepath.Join(dir, "keep.bin")
+
+		w, closeFn, err := fs.OpenWrite(path, 3)
+		require.NoError(t, err)
+		_, err = w.WriteAt([]byte{9, 9, 9}, 0)
+		require.NoError(t, err)
+		require.NoError(t, closeFn(false))
+
+		got, err := fs.ReadFile(path)
+		require.NoError(t, err)
+		require.Equal(t, []byte{1, 2, 3}, got)
+	})
+}
+
+// The original must stay readable while its replacement is being written —
+// repair reads surviving shards out of the file it is replacing.
+func TestOpenWriteKeepsOriginalReadableUntilCommit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "live.bin")
+	require.NoError(t, defaultFileIO{}.WriteFile(path, []byte{1, 2, 3, 4}))
+
+	w, closeFn, err := defaultFileIO{}.OpenWrite(path, 4)
+	require.NoError(t, err)
+	_, err = w.WriteAt([]byte{9, 9, 9, 9}, 0)
+	require.NoError(t, err)
+
+	// Mid-write, the original still reads as it was.
+	r, size, rClose, err := defaultFileIO{}.OpenRead(path)
+	require.NoError(t, err)
+	require.Equal(t, int64(4), size)
+	buf := make([]byte, 4)
+	_, err = r.ReadAt(buf, 0)
+	require.NoError(t, err)
+	require.Equal(t, []byte{1, 2, 3, 4}, buf)
+	require.NoError(t, rClose())
+
+	require.NoError(t, closeFn(true))
+	got, err := defaultFileIO{}.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, []byte{9, 9, 9, 9}, got)
 }

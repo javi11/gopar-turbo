@@ -1,7 +1,9 @@
 package par2
 
 import (
+	"io"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/javi11/gopar-turbo/memfs"
@@ -128,4 +130,66 @@ func TestChunkSizeForCapsDefaultFootprint(t *testing.T) {
 
 	// Small sets stay single-pass.
 	require.Equal(t, 4096, chunkSizeFor(0, 4096, 10))
+}
+
+// writeRecordingFileIO distinguishes whole-file writes from positional ones.
+type writeRecordingFileIO struct {
+	fileIO
+	mu         sync.Mutex
+	wholeFiles []string
+	positional []string
+}
+
+func (w *writeRecordingFileIO) WriteFile(path string, data []byte) error {
+	w.mu.Lock()
+	w.wholeFiles = append(w.wholeFiles, filepath.Base(path))
+	w.mu.Unlock()
+	return w.fileIO.WriteFile(path, data)
+}
+
+func (w *writeRecordingFileIO) OpenWrite(path string, size int64) (io.WriterAt, func(commit bool) error, error) {
+	w.mu.Lock()
+	w.positional = append(w.positional, filepath.Base(path))
+	w.mu.Unlock()
+	return w.fileIO.OpenWrite(path, size)
+}
+
+// Repair must not buffer whole reconstructed files.
+func TestRepairWritesIncrementally(t *testing.T) {
+	workingDir := memfs.RootDir()
+	fs := makeShiftTestMemFS(workingDir)
+	buildPAR2Data(t, fs, workingDir, 4, 2)
+	want := pristineBig(t, workingDir)
+	perturbFile(t, fs, "big.rar")
+
+	rec := &writeRecordingFileIO{fileIO: testFileIO{t, fs}}
+	_, err := repair(rec, filepath.Join(workingDir, "file.par2"), RepairOptions{})
+	require.NoError(t, err)
+
+	require.Contains(t, rec.positional, "big.rar")
+	require.NotContains(t, rec.wholeFiles, "big.rar",
+		"repaired data files must be written positionally, not buffered whole")
+
+	got, err := fs.ReadFile(filepath.Join(workingDir, "big.rar"))
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+}
+
+// Many chunk passes through the incremental writer must not change output,
+// including the trailing partial slice.
+func TestIncrementalRepairChunkedByteIdentical(t *testing.T) {
+	workingDir := memfs.RootDir()
+	fs := makeShiftTestMemFS(workingDir) // 40 bytes: 10 slices of 4
+	buildPAR2Data(t, fs, workingDir, 4, 10)
+	want := pristineBig(t, workingDir)
+	_, err := fs.RemoveFile(filepath.Join(workingDir, "big.rar"))
+	require.NoError(t, err)
+
+	_, err = repair(testFileIO{t, fs}, filepath.Join(workingDir, "file.par2"),
+		RepairOptions{MemoryBudget: 2}) // chunk = 2 bytes -> 2 passes per slice
+	require.NoError(t, err)
+
+	got, err := fs.ReadFile(filepath.Join(workingDir, "big.rar"))
+	require.NoError(t, err)
+	require.Equal(t, want, got)
 }

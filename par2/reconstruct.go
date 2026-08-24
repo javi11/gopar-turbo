@@ -203,16 +203,18 @@ func (d *Decoder) planReconstruction() (rsec16.Coder, []int, []int, []int, []fol
 	return coder, availableRows, missingRows, usedParityRows, inputs, nil
 }
 
-// reconstructMissing rebuilds every missing shard, keyed by its global shard
-// index. It holds only one accumulator per missing shard — bounded further by
-// MemoryBudget — and re-reads surviving shards from disk as it folds.
-func (d *Decoder) reconstructMissing() (map[int][]byte, error) {
+// reconstructTo rebuilds the missing shards chunk range by chunk range,
+// handing each rebuilt range to sink instead of accumulating it, so nothing
+// reconstructed is ever resident beyond one chunk pass. preserved supplies
+// surviving shards that were read before their source file was overwritten.
+// sink is called once per (missing shard, chunk range), from one goroutine.
+func (d *Decoder) reconstructTo(cache *readerCache, preserved map[int][]byte, sink func(globalRow, off int, data []byte) error) ([]int, error) {
 	coder, availableRows, missingRows, usedParityRows, inputs, err := d.planReconstruction()
 	if err != nil {
 		return nil, err
 	}
 	if len(missingRows) == 0 {
-		return map[int][]byte{}, nil
+		return nil, nil
 	}
 
 	m, err := coder.ReconstructionMatrix(availableRows, missingRows, usedParityRows)
@@ -220,14 +222,9 @@ func (d *Decoder) reconstructMissing() (map[int][]byte, error) {
 		return nil, err
 	}
 
-	result := make(map[int][]byte, len(missingRows))
-	for _, row := range missingRows {
-		result[row] = make([]byte, d.sliceByteCount)
-	}
-
-	cache := newReaderCache(d)
-	defer cache.Close()
-
+	// Data inputs come first and in availableRows order, so input j maps to
+	// global row availableRows[j]; preserved shards stand in for sources
+	// whose files are being rewritten.
 	chunk := chunkSizeFor(d.memoryBudget, d.sliceByteCount, len(missingRows))
 	out := make([][]byte, len(missingRows))
 
@@ -257,6 +254,17 @@ func (d *Decoder) reconstructMissing() (map[int][]byte, error) {
 				}
 				return cache.readAbs(loc.path, loc.offset+int64(off), buf[:end-off])
 			}
+			if shard, ok := preserved[availableRows[j]]; ok {
+				clear(buf)
+				if off < len(shard) {
+					end := off + n
+					if end > len(shard) {
+						end = len(shard)
+					}
+					copy(buf, shard[off:end])
+				}
+				return nil
+			}
 			return cache.readRange(in.shard, off, buf)
 		}, out, d.numGoroutines)
 		if err != nil {
@@ -264,20 +272,11 @@ func (d *Decoder) reconstructMissing() (map[int][]byte, error) {
 		}
 
 		for i, row := range missingRows {
-			copy(result[row][off:off+n], out[i])
+			if err := sink(row, off, out[i]); err != nil {
+				return nil, err
+			}
 		}
 	}
 
-	return result, nil
-}
-
-// shardSource returns the bytes of the shard at the given global index,
-// reading survivors from disk and taking rebuilt shards from reconstructed.
-func (d *Decoder) shardSource(cache *readerCache, reconstructed map[int][]byte, globalIdx int, info shardIntegrityInfo, buf []byte) error {
-	if shard, ok := reconstructed[globalIdx]; ok {
-		clear(buf)
-		copy(buf, shard)
-		return nil
-	}
-	return cache.readRange(info, 0, buf)
+	return missingRows, nil
 }

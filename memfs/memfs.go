@@ -160,10 +160,15 @@ func (w *memWriter) WriteAt(p []byte, off int64) (int, error) {
 	return len(p), nil
 }
 
-// OpenWrite creates or truncates the file at path at the given size. Writes
-// land in a private buffer that replaces the file's contents on close, so a
-// concurrent reader of the old contents is unaffected.
-func (fs MemFS) OpenWrite(path string, size int64) (io.WriterAt, func() error, error) {
+// OpenWrite starts a size-byte write of path. Writes land in a private buffer;
+// close(true) installs it as the file's contents, close(false) discards it. A
+// reader of the old contents is unaffected until the commit.
+func (fs MemFS) OpenWrite(path string, size int64) (io.WriterAt, func(commit bool) error, error) {
 	w := &memWriter{fs: fs, path: path, data: make([]byte, size)}
-	return w, func() error { return fs.WriteFile(w.path, w.data) }, nil
+	return w, func(commit bool) error {
+		if !commit {
+			return nil
+		}
+		return fs.WriteFile(w.path, w.data)
+	}, nil
 }
