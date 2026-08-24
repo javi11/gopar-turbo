@@ -7,41 +7,72 @@ import (
 	"github.com/javi11/gopar-turbo/rsec16"
 )
 
+// parityLocation is where a recovery block's data lives on disk. Blocks are
+// read back per chunk pass rather than retained: on a large set they are
+// hundreds of megabytes in aggregate.
+type parityLocation struct {
+	path   string
+	offset int64
+	length int
+}
+
 // readerCache keeps data files open for the duration of a reconstruction.
 // Reconstruction reads every surviving shard once per chunk pass, so reopening
 // a file per shard would dominate the cost.
 type readerCache struct {
 	d       *Decoder
-	readers map[fileID]io.ReaderAt
-	sizes   map[fileID]int64
+	readers map[string]io.ReaderAt
+	sizes   map[string]int64
 	closers []func() error
 }
 
 func newReaderCache(d *Decoder) *readerCache {
 	return &readerCache{
 		d:       d,
-		readers: make(map[fileID]io.ReaderAt),
-		sizes:   make(map[fileID]int64),
+		readers: make(map[string]io.ReaderAt),
+		sizes:   make(map[string]int64),
 	}
 }
 
-func (c *readerCache) get(id fileID) (io.ReaderAt, int64, error) {
-	if r, ok := c.readers[id]; ok {
-		return r, c.sizes[id], nil
+// getPath opens path once and keeps it open for the cache's lifetime.
+func (c *readerCache) getPath(path string) (io.ReaderAt, int64, error) {
+	if r, ok := c.readers[path]; ok {
+		return r, c.sizes[path], nil
 	}
-	idx, ok := c.d.fileIDIndices[id]
-	if !ok {
-		return nil, 0, errors.New("unknown file for shard")
-	}
-	path := c.d.getFilePath(c.d.recoverySet[idx])
 	r, size, closeFn, err := c.d.fileIO.OpenRead(path)
 	if err != nil {
 		return nil, 0, err
 	}
-	c.readers[id] = r
-	c.sizes[id] = size
+	c.readers[path] = r
+	c.sizes[path] = size
 	c.closers = append(c.closers, closeFn)
 	return r, size, nil
+}
+
+func (c *readerCache) get(id fileID) (io.ReaderAt, int64, error) {
+	idx, ok := c.d.fileIDIndices[id]
+	if !ok {
+		return nil, 0, errors.New("unknown file for shard")
+	}
+	return c.getPath(c.d.getFilePath(c.d.recoverySet[idx]))
+}
+
+// readAbs fills buf from path at an absolute offset, zero-padding past end.
+func (c *readerCache) readAbs(path string, off int64, buf []byte) error {
+	clear(buf)
+	r, size, err := c.getPath(path)
+	if err != nil {
+		return err
+	}
+	if off >= size {
+		return nil
+	}
+	n := int64(len(buf))
+	if off+n > size {
+		n = size - off
+	}
+	_, err = r.ReadAt(buf[:n], off)
+	return err
 }
 
 func (c *readerCache) Close() {
@@ -127,7 +158,7 @@ func (d *Decoder) planReconstruction() (rsec16.Coder, []int, []int, []int, []fol
 	if totalShards == 0 {
 		return rsec16.Coder{}, nil, nil, nil, nil, errors.New("no file integrity info")
 	}
-	if len(d.parityShards) == 0 {
+	if len(d.parityPresent) == 0 {
 		return rsec16.Coder{}, nil, nil, nil, nil, errors.New("no parity shards")
 	}
 
@@ -145,8 +176,8 @@ func (d *Decoder) planReconstruction() (rsec16.Coder, []int, []int, []int, []fol
 	}
 
 	var usedParityRows []int
-	for i := 0; i < len(d.parityShards) && len(inputs) < totalShards; i++ {
-		if len(d.parityShards[i]) == 0 {
+	for i := 0; i < len(d.parityPresent) && len(inputs) < totalShards; i++ {
+		if !d.parityPresent[i] {
 			continue
 		}
 		usedParityRows = append(usedParityRows, i)
@@ -156,7 +187,7 @@ func (d *Decoder) planReconstruction() (rsec16.Coder, []int, []int, []int, []fol
 		return rsec16.Coder{}, nil, nil, nil, nil, rsec16.NotEnoughParityShardsError{}
 	}
 
-	coder, err := rsec16.NewCoderPAR2Vandermonde(totalShards, len(d.parityShards), d.numGoroutines)
+	coder, err := rsec16.NewCoderPAR2Vandermonde(totalShards, len(d.parityPresent), d.numGoroutines)
 	if err != nil {
 		return rsec16.Coder{}, nil, nil, nil, nil, err
 	}
@@ -206,15 +237,16 @@ func (d *Decoder) reconstructMissing() (map[int][]byte, error) {
 		err := rsec16.FoldInputs(m, len(inputs), n, func(j int, buf []byte) error {
 			in := inputs[j]
 			if in.isParity {
-				shard := d.parityShards[in.parityIdx]
-				if off < len(shard) {
-					end := off + n
-					if end > len(shard) {
-						end = len(shard)
-					}
-					copy(buf, shard[off:end])
+				loc := d.parityLocations[in.parityIdx]
+				clear(buf)
+				if off >= loc.length {
+					return nil
 				}
-				return nil
+				end := off + n
+				if end > loc.length {
+					end = loc.length
+				}
+				return cache.readAbs(loc.path, loc.offset+int64(off), buf[:end-off])
 			}
 			return cache.readRange(in.shard, off, buf)
 		}, out, d.numGoroutines)

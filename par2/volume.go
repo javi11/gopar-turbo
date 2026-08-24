@@ -13,13 +13,13 @@ import (
 const maxPacketLength = 1 << 30
 
 // walkPackets streams the packets of one PAR2 file, calling fn with each
-// packet's set ID, type, and body. Validation (magic, length, packet hash)
+// packet's set ID, type, body, and absolute offset. Validation (magic, length, packet hash)
 // is exactly readNextPacket's, applied per packet. body aliases an internal
 // reusable buffer: fn must copy anything it retains.
 //
 // This exists so recovery volumes — hundreds of megabytes each on large
 // sets — never have to be materialised whole just to enumerate packets.
-func walkPackets(r io.ReaderAt, size int64, fn func(setID recoverySetID, typ packetType, body []byte) error) error {
+func walkPackets(r io.ReaderAt, size int64, fn func(setID recoverySetID, typ packetType, body []byte, packetOffset int64) error) error {
 	headerSize := int64(sizeOfPacketHeader())
 	var packetBuf []byte
 	var header [64]byte
@@ -49,7 +49,7 @@ func walkPackets(r io.ReaderAt, size int64, fn func(setID recoverySetID, typ pac
 		if err != nil {
 			return err
 		}
-		if err := fn(setID, typ, body); err != nil {
+		if err := fn(setID, typ, body, offset); err != nil {
 			return err
 		}
 		offset += length

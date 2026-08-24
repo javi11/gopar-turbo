@@ -139,13 +139,13 @@ func TestLoadParityPresenceRetainsNoBytes(t *testing.T) {
 	require.Equal(t, 2, counts.UsableParityShardCount)
 	require.Zero(t, counts.UnusableParityShardCount)
 
-	for i, shard := range d.parityShards {
-		require.Empty(t, shard, "parity shard %d must not be retained", i)
+	for i, loc := range d.parityLocations {
+		require.Empty(t, loc.path, "parity shard %d must not be located in presence mode", i)
 	}
 }
 
-// LoadParityData still yields usable bytes for repair.
-func TestLoadParityDataRetainsBytes(t *testing.T) {
+// LoadParityData records where each block lives so repair can read it back.
+func TestLoadParityDataRecordsLocations(t *testing.T) {
 	workingDir := memfs.RootDir()
 	fs := makeShiftTestMemFS(workingDir)
 	buildPAR2Data(t, fs, workingDir, 4, 2)
@@ -156,7 +156,8 @@ func TestLoadParityDataRetainsBytes(t *testing.T) {
 	require.NoError(t, d.LoadParityData())
 
 	require.Equal(t, 2, d.ShardCounts().UsableParityShardCount)
-	for i, shard := range d.parityShards {
-		require.Len(t, shard, 4, "parity shard %d", i)
+	for i, loc := range d.parityLocations {
+		require.NotEmpty(t, loc.path, "parity block %d location", i)
+		require.Equal(t, 4, loc.length, "parity block %d length", i)
 	}
 }

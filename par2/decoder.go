@@ -236,7 +236,10 @@ type Decoder struct {
 	// Indexed the same as recoverySet.
 	fileIntegrityInfos []fileIntegrityInfo
 
-	parityShards [][]byte
+	// parityLocations[i] is where recovery block i's data lives on disk;
+	// blocks are read back on demand instead of being retained. Entries
+	// with an empty path are absent — parityPresent is the source of truth.
+	parityLocations []parityLocation
 	// parityPresent[i] records that parity shard i exists, even when its
 	// bytes were not retained.
 	parityPresent []bool
@@ -765,7 +768,7 @@ func (d *Decoder) loadParityData(retain bool) error {
 	}
 
 	var parityPresent []bool
-	var parityShards [][]byte
+	var parityLocations []parityLocation
 	for i, match := range matches {
 		volumeErr := func() error {
 			r, size, closeFn, err := d.fileIO.OpenRead(match)
@@ -781,7 +784,7 @@ func (d *Decoder) loadParityData(retain bool) error {
 			foundPacket := false
 			var volMainPacket *mainPacket
 
-			err = walkPackets(r, size, func(setID recoverySetID, typ packetType, body []byte) error {
+			err = walkPackets(r, size, func(setID recoverySetID, typ packetType, body []byte, packetOffset int64) error {
 				if setID != d.setID {
 					delegate.OnOtherPacketSkip(setID, typ, len(body))
 					return nil
@@ -804,16 +807,20 @@ func (d *Decoder) loadParityData(retain bool) error {
 					if int(exp) >= len(parityPresent) {
 						grow := int(exp+1) - len(parityPresent)
 						parityPresent = append(parityPresent, make([]bool, grow)...)
-						parityShards = append(parityShards, make([][]byte, grow)...)
+						parityLocations = append(parityLocations, make([]parityLocation, grow)...)
 					}
 					parityPresent[exp] = true
+					// Record where the block lives rather than copying it;
+					// the fold reads it back per chunk pass. A recovery
+					// packet's body is a 4-byte exponent then the data.
 					// First wins for duplicate exponents; duplicates are
-					// byte-identical by packet hash, so this only avoids a
-					// redundant copy.
-					if retain && parityShards[exp] == nil {
-						shard := make([]byte, len(packet.data))
-						copy(shard, packet.data)
-						parityShards[exp] = shard
+					// byte-identical by packet hash.
+					if retain && parityLocations[exp].path == "" {
+						parityLocations[exp] = parityLocation{
+							path:   match,
+							offset: packetOffset + int64(sizeOfPacketHeader()) + 4,
+							length: len(packet.data),
+						}
 					}
 				case creatorPacketType:
 					delegate.OnCreatorPacketLoad(readCreatorPacket(body))
@@ -864,7 +871,7 @@ func (d *Decoder) loadParityData(retain bool) error {
 	}
 
 	d.parityPresent = parityPresent
-	d.parityShards = parityShards
+	d.parityLocations = parityLocations
 	return nil
 }
 
@@ -1141,7 +1148,7 @@ func (d *Decoder) verifyParity(reconstructed map[int][]byte) error {
 	cache := newReaderCache(d)
 	defer cache.Close()
 
-	parityCount := len(d.parityShards)
+	parityCount := len(d.parityPresent)
 	chunk := chunkSizeFor(d.memoryBudget, d.sliceByteCount, parityCount)
 	out := make([][]byte, parityCount)
 
@@ -1173,15 +1180,21 @@ func (d *Decoder) verifyParity(reconstructed map[int][]byte) error {
 			return err
 		}
 
-		for i, shard := range d.parityShards {
-			if len(shard) == 0 {
+		// Compare against the stored recovery blocks, read back from
+		// their volumes a chunk at a time.
+		stored := make([]byte, n)
+		for i, loc := range d.parityLocations {
+			if loc.path == "" || off >= loc.length {
 				continue
 			}
 			end := off + n
-			if end > len(shard) {
-				end = len(shard)
+			if end > loc.length {
+				end = loc.length
 			}
-			if !bytes.Equal(out[i][:end-off], shard[off:end]) {
+			if err := cache.readAbs(loc.path, loc.offset+int64(off), stored[:end-off]); err != nil {
+				return err
+			}
+			if !bytes.Equal(out[i][:end-off], stored[:end-off]) {
 				return errors.New("repair failed")
 			}
 		}

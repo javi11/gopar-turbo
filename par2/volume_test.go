@@ -23,7 +23,7 @@ func TestWalkPacketsMatchesReadFile(t *testing.T) {
 	r, size, closeFn, err := fs.OpenRead(volPath)
 	require.NoError(t, err)
 	defer closeFn()
-	err = walkPackets(r, size, func(setID recoverySetID, typ packetType, body []byte) error {
+	err = walkPackets(r, size, func(setID recoverySetID, typ packetType, body []byte, _ int64) error {
 		walked = append(walked, typ)
 		return nil
 	})
@@ -58,7 +58,7 @@ func TestWalkPacketsRejectsCorruptPacket(t *testing.T) {
 	r, size, closeFn, err := fs.OpenRead(volPath)
 	require.NoError(t, err)
 	defer closeFn()
-	err = walkPackets(r, size, func(recoverySetID, packetType, []byte) error { return nil })
+	err = walkPackets(r, size, func(recoverySetID, packetType, []byte, int64) error { return nil })
 	require.Error(t, err, "hash-mismatched packet must surface an error")
 }
 
@@ -79,13 +79,14 @@ func TestLoadParityDoesNotReadVolumesWhole(t *testing.T) {
 
 			if mode == "presence" {
 				require.NoError(t, d.LoadParityPresence())
-				for i, shard := range d.parityShards {
-					require.Empty(t, shard, "presence mode must not retain shard %d", i)
+				for i, loc := range d.parityLocations {
+					require.Empty(t, loc.path, "presence mode must not record location %d", i)
 				}
 			} else {
 				require.NoError(t, d.LoadParityData())
-				for i, shard := range d.parityShards {
-					require.Len(t, shard, 4, "retain mode must keep shard %d", i)
+				for i, loc := range d.parityLocations {
+					require.NotEmpty(t, loc.path, "retain mode must locate block %d", i)
+					require.Equal(t, 4, loc.length, "block %d length", i)
 				}
 			}
 			require.Equal(t, 2, d.ShardCounts().UsableParityShardCount)
@@ -116,4 +117,52 @@ func TestLoadParitySkipsForeignSetVolume(t *testing.T) {
 	require.NoError(t, d.LoadParityData())
 	require.Equal(t, 1, d.ShardCounts().UsableParityShardCount,
 		"only the volume from our set should contribute")
+}
+
+// After LoadParityData, recovery-block bytes must not be retained; the
+// location table must point exactly at each block's data on disk.
+func TestLoadParityRecordsLocationsNotBytes(t *testing.T) {
+	workingDir := memfs.RootDir()
+	fs := makeShiftTestMemFS(workingDir)
+	buildPAR2Data(t, fs, workingDir, 4, 2)
+
+	d, err := newDecoderForTest(t, fs, filepath.Join(workingDir, "file.par2"))
+	require.NoError(t, err)
+	require.NoError(t, d.LoadFileData())
+	require.NoError(t, d.LoadParityData())
+
+	require.Equal(t, 2, d.ShardCounts().UsableParityShardCount)
+	require.Len(t, d.parityLocations, 2)
+
+	for i, loc := range d.parityLocations {
+		require.NotEmpty(t, loc.path, "location %d", i)
+		require.Equal(t, 4, loc.length, "location %d", i)
+
+		r, _, closeFn, err := fs.OpenRead(loc.path)
+		require.NoError(t, err)
+		got := make([]byte, loc.length)
+		_, err = r.ReadAt(got, loc.offset)
+		require.NoError(t, err)
+		require.NoError(t, closeFn())
+
+		// Reference: the same block via a whole-file parse.
+		data, err := fs.ReadFile(loc.path)
+		require.NoError(t, err)
+		var want []byte
+		buf := bytes.NewBuffer(data)
+		for {
+			_, typ, body, rerr := readNextPacket(buf)
+			if rerr != nil {
+				break
+			}
+			if typ == recoveryPacketType {
+				exp, packet, perr := readRecoveryPacket(body)
+				require.NoError(t, perr)
+				if int(exp) == i {
+					want = packet.data
+				}
+			}
+		}
+		require.Equal(t, want, got, "location %d must point at the block data", i)
+	}
 }
