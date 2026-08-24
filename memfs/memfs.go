@@ -85,7 +85,12 @@ func (fs MemFS) FindWithPrefixAndSuffix(prefix, suffix string) ([]string, error)
 // may not already exist.
 func (fs MemFS) WriteFile(path string, data []byte) error {
 	absPath := toAbsPath(fs.workingDir, path)
-	fs.fileData[absPath] = data
+	// Copy, so the caller may reuse its buffer afterwards exactly as it
+	// could with os.WriteFile. Storing the caller's slice let a later
+	// mutation silently rewrite an already-written file.
+	stored := make([]byte, len(data))
+	copy(stored, data)
+	fs.fileData[absPath] = stored
 	return nil
 }
 

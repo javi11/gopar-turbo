@@ -188,7 +188,7 @@ func buildPAR2Data(t *testing.T, fs memfs.MemFS, basePath string, sliceByteCount
 }
 
 func newDecoderForTest(t *testing.T, fs memfs.MemFS, indexPath string) (*Decoder, error) {
-	return newDecoder(testFileIO{t, fs}, testDecoderDelegate{t}, indexPath, rsec16.DefaultNumGoroutines(), scanPolicy{findMisaligned: true})
+	return newDecoder(testFileIO{t, fs}, testDecoderDelegate{t}, indexPath, rsec16.DefaultNumGoroutines(), scanPolicy{findMisaligned: true}, 0)
 }
 
 func makeDecoderMemFS(workingDir string) memfs.MemFS {

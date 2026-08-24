@@ -33,6 +33,12 @@ type VerifyOptions struct {
 	// slice. Zero means unbounded. Ignored when FindMisalignedData
 	// is false.
 	MisalignedSearchLimit int
+	// MemoryBudget caps the bytes held for reconstruction accumulators.
+	// Zero selects half of physical memory, matching par2cmdline's -m.
+	// When the budget is smaller than one accumulator per missing shard,
+	// repair splits slices into byte ranges and makes several passes over
+	// the inputs rather than exceeding it.
+	MemoryBudget int
 }
 
 // VerifyResult holds the result of a Verify call.
@@ -67,7 +73,7 @@ func verify(fileIO fileIO, parPath string, options VerifyOptions) (VerifyResult,
 	decoder, err := newDecoder(fileIO, delegate, parPath, numGoroutines, scanPolicy{
 		findMisaligned: options.FindMisalignedData,
 		searchLimit:    options.MisalignedSearchLimit,
-	})
+	}, options.MemoryBudget)
 	if err != nil {
 		return VerifyResult{}, err
 	}

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"time"
 
 	"github.com/javi11/gopar-turbo/gf16"
@@ -39,6 +40,7 @@ func main() {
 	doubleCheck := flag.Bool("double-check", false, "verify repaired shards after repair")
 	findMisaligned := flag.Bool("find-misaligned", false, "search for shards that sit off a slice boundary (par2cmdline -N)")
 	searchLimit := flag.Int("misaligned-limit", 0, "bound the misaligned search slide; 0 = unbounded")
+	memProfile := flag.String("memprofile", "", "write an in-use heap profile to this path")
 	flag.Parse()
 
 	if *parPath == "" {
@@ -90,6 +92,14 @@ func main() {
 		os.Exit(2)
 	}
 	r.Seconds = time.Since(start).Seconds()
+
+	if *memProfile != "" {
+		f, ferr := os.Create(*memProfile)
+		if ferr == nil {
+			_ = pprof.Lookup("heap").WriteTo(f, 0)
+			f.Close()
+		}
+	}
 	r.PeakRSSBytes = peakRSS()
 
 	if err != nil {

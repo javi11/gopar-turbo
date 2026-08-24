@@ -92,7 +92,7 @@ func TestScanDoesNotReadDataFilesWhole(t *testing.T) {
 
 	counting := newCountingFileIO(testFileIO{t, fs})
 	d, err := newDecoder(counting, testDecoderDelegate{t},
-		filepath.Join(workingDir, "file.par2"), 1, defaultScanPolicy())
+		filepath.Join(workingDir, "file.par2"), 1, defaultScanPolicy(), 0)
 	require.NoError(t, err)
 	require.NoError(t, d.LoadFileData())
 
