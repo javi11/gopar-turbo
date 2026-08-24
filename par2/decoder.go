@@ -750,58 +750,99 @@ func (d *Decoder) loadParityData(retain bool) error {
 	var parityPresent []bool
 	var parityShards [][]byte
 	for i, match := range matches {
-		parityFile, err := func() (*file, error) {
-			volumeBytes, err := d.fileIO.ReadFile(match)
+		volumeErr := func() error {
+			r, size, closeFn, err := d.fileIO.OpenRead(match)
 			if err != nil {
-				return nil, err
+				return err
 			}
+			defer closeFn()
 
-			// Ignore all the other packet types other
-			// than recovery packets.
-			_, parityFile, err := readFile(recoveryDelegate{d.delegate}, &d.setID, volumeBytes)
-			if _, ok := err.(noPacketsFoundError); ok {
-				return nil, nil
-			} else if err != nil {
-				// TODO: Relax this check.
-				return nil, err
+			// Volumes are streamed packet-by-packet: on large sets they are
+			// hundreds of megabytes each, and only recovery-packet bodies
+			// (in retain mode) are worth keeping.
+			delegate := recoveryDelegate{d.delegate}
+			foundPacket := false
+			var volMainPacket *mainPacket
+
+			err = walkPackets(r, size, func(setID recoverySetID, typ packetType, body []byte) error {
+				if setID != d.setID {
+					delegate.OnOtherPacketSkip(setID, typ, len(body))
+					return nil
+				}
+				foundPacket = true
+				switch typ {
+				case mainPacketType:
+					mp, err := readMainPacket(body)
+					if err != nil {
+						return err
+					}
+					volMainPacket = &mp
+					delegate.OnMainPacketLoad(mp.sliceByteCount, len(mp.recoverySet), len(mp.nonRecoverySet))
+				case recoveryPacketType:
+					exp, packet, err := readRecoveryPacket(body)
+					if err != nil {
+						return err
+					}
+					delegate.OnRecoveryPacketLoad(uint16(exp), len(packet.data))
+					if int(exp) >= len(parityPresent) {
+						grow := int(exp+1) - len(parityPresent)
+						parityPresent = append(parityPresent, make([]bool, grow)...)
+						parityShards = append(parityShards, make([][]byte, grow)...)
+					}
+					parityPresent[exp] = true
+					// First wins for duplicate exponents; duplicates are
+					// byte-identical by packet hash, so this only avoids a
+					// redundant copy.
+					if retain && parityShards[exp] == nil {
+						shard := make([]byte, len(packet.data))
+						copy(shard, packet.data)
+						parityShards[exp] = shard
+					}
+				case creatorPacketType:
+					delegate.OnCreatorPacketLoad(readCreatorPacket(body))
+				case fileDescriptionPacketType:
+					// Parsed for validation only, matching readFile; the
+					// recovery delegate suppresses the callback.
+					fileID, fdp, err := readFileDescriptionPacket(body)
+					if err != nil {
+						return err
+					}
+					delegate.OnFileDescriptionPacketLoad(fileID, fdp.filename, fdp.byteCount)
+				case ifscPacketType:
+					fileID, _, err := readIFSCPacket(body)
+					if err != nil {
+						return err
+					}
+					delegate.OnIFSCPacketLoad(fileID)
+				default:
+					delegate.OnUnknownPacketLoad(typ, len(body))
+				}
+				return nil
+			})
+			if err != nil {
+				return err
 			}
-
-			if d.sliceByteCount != parityFile.mainPacket.sliceByteCount {
-				return nil, errors.New("slice byte count mismatch")
+			if !foundPacket {
+				// No packets for our set: skip the volume, matching the
+				// old noPacketsFoundError handling.
+				return nil
 			}
-
-			if !reflect.DeepEqual(decoderInputFileInfoIDs(d.recoverySet), parityFile.mainPacket.recoverySet) {
-				return nil, errors.New("recovery set mismatch")
+			if volMainPacket != nil {
+				if d.sliceByteCount != volMainPacket.sliceByteCount {
+					return errors.New("slice byte count mismatch")
+				}
+				if !reflect.DeepEqual(decoderInputFileInfoIDs(d.recoverySet), volMainPacket.recoverySet) {
+					return errors.New("recovery set mismatch")
+				}
+				if !reflect.DeepEqual(decoderInputFileInfoIDs(d.nonRecoverySet), volMainPacket.nonRecoverySet) {
+					return errors.New("non-recovery set mismatch")
+				}
 			}
-
-			if !reflect.DeepEqual(decoderInputFileInfoIDs(d.nonRecoverySet), parityFile.mainPacket.nonRecoverySet) {
-				return nil, errors.New("non-recovery set mismatch")
-			}
-
-			return &parityFile, nil
+			return nil
 		}()
-		d.delegate.OnParityFileLoad(i+1, match, err)
-		if err != nil {
-			return err
-		}
-		if parityFile == nil {
-			continue
-		}
-
-		for exponent, packet := range parityFile.recoveryPackets {
-			if int(exponent) >= len(parityPresent) {
-				grow := int(exponent+1) - len(parityPresent)
-				parityPresent = append(parityPresent, make([]bool, grow)...)
-				parityShards = append(parityShards, make([][]byte, grow)...)
-			}
-			parityPresent[exponent] = true
-			if retain {
-				// Copy out of the volume buffer so the buffer itself can be
-				// collected instead of being pinned by this subslice.
-				shard := make([]byte, len(packet.data))
-				copy(shard, packet.data)
-				parityShards[exponent] = shard
-			}
+		d.delegate.OnParityFileLoad(i+1, match, volumeErr)
+		if volumeErr != nil {
+			return volumeErr
 		}
 	}
 
