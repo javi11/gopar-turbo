@@ -207,6 +207,12 @@ endif # ARCH
 libgf16.a: $(ALL_OBJS)
 	$(AR) rcs $@ $^
 
+# Separate archive holding libstdc++-only helpers that gf16mul.cpp references.
+# Kept out of libgf16.a on purpose: consumers list it after -lstdc++, so it is
+# only extracted when the C++ runtime in use does not already define them.
+libgf16_compat.a: $(BUILDDIR)/stdcxx_compat.cpp.o
+	$(AR) rcs $@ $^
+
 # Create build directories
 $(BUILDDIR)/gf16:
 	mkdir -p $@
@@ -334,6 +340,9 @@ $(BUILDDIR)/gf16mul.cpp.o: $(GF16DIR)/gf16mul.cpp | $(BUILDDIR)/gf16
 $(BUILDDIR)/bridge.cpp.o: csrc/bridge.cpp | $(BUILDDIR)/gf16
 	$(CXX) $(CXXFLAGS_COMMON) $(DEFINES) -I. -c -o $@ $<
 
+$(BUILDDIR)/stdcxx_compat.cpp.o: csrc/stdcxx_compat.cpp | $(BUILDDIR)/gf16
+	$(CXX) $(CXXFLAGS_COMMON) -fno-exceptions -c -o $@ $<
+
 # ============================================================================
 # Housekeeping
 # ============================================================================
@@ -344,17 +353,20 @@ $(BUILDDIR)/bridge.cpp.o: csrc/bridge.cpp | $(BUILDDIR)/gf16
 
 # Build for the current platform and copy to the native-named output
 .PHONY: native
-native: libgf16.a
+native: libgf16.a libgf16_compat.a
 ifeq ($(shell uname -s),Darwin)
 	cp libgf16.a libgf16_darwin.a
 else ifeq ($(shell uname -s),Linux)
   ifeq ($(ARCH),x86_64)
 	cp libgf16.a libgf16_linux_amd64.a
+	cp libgf16_compat.a libgf16_compat_linux_amd64.a
   else
 	cp libgf16.a libgf16_linux_arm64.a
+	cp libgf16_compat.a libgf16_compat_linux_arm64.a
   endif
 else
 	cp libgf16.a libgf16_windows_amd64.a
+	cp libgf16_compat.a libgf16_compat_windows_amd64.a
 endif
 
 # macOS universal binary (amd64 + arm64)
@@ -371,19 +383,22 @@ darwin:
 
 # Linux amd64 (run on ubuntu-latest)
 .PHONY: linux/amd64
-linux/amd64: libgf16.a
+linux/amd64: libgf16.a libgf16_compat.a
 	cp libgf16.a libgf16_linux_amd64.a
+	cp libgf16_compat.a libgf16_compat_linux_amd64.a
 
 # Linux arm64 (run on ubuntu-24.04-arm)
 .PHONY: linux/arm64
-linux/arm64: libgf16.a
+linux/arm64: libgf16.a libgf16_compat.a
 	cp libgf16.a libgf16_linux_arm64.a
+	cp libgf16_compat.a libgf16_compat_linux_arm64.a
 
 # Windows amd64 (run on windows-latest with MSYS2/MinGW)
 .PHONY: windows/amd64
-windows/amd64: libgf16.a
+windows/amd64: libgf16.a libgf16_compat.a
 	cp libgf16.a libgf16_windows_amd64.a
+	cp libgf16_compat.a libgf16_compat_windows_amd64.a
 
 .PHONY: clean
 clean:
-	rm -rf $(BUILDDIR) libgf16.a
+	rm -rf $(BUILDDIR) libgf16.a libgf16_compat.a
