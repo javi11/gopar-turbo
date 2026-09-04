@@ -43,7 +43,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: libgf16_linux_amd64
-          path: gf16/libgf16_linux_amd64.a
+          path: |
+            gf16/libgf16_linux_amd64.a
+            gf16/libgf16_compat_linux_amd64.a
 
   linux-arm64:
     runs-on: ubuntu-24.04-arm
@@ -58,7 +60,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: libgf16_linux_arm64
-          path: gf16/libgf16_linux_arm64.a
+          path: |
+            gf16/libgf16_linux_arm64.a
+            gf16/libgf16_compat_linux_arm64.a
 
   windows-amd64:
     runs-on: windows-latest
@@ -95,7 +99,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: libgf16_windows_amd64
-          path: gf16/libgf16_windows_amd64.a
+          path: |
+            gf16/libgf16_windows_amd64.a
+            gf16/libgf16_compat_windows_amd64.a
 
   commit:
     needs: [darwin, linux-amd64, linux-arm64, windows-amd64]

@@ -5,9 +5,13 @@ package gf16
 /*
 #cgo CXXFLAGS: -std=c++11
 #cgo darwin LDFLAGS: ${SRCDIR}/libgf16_darwin.a -lstdc++ -lm
-#cgo linux,amd64 LDFLAGS: ${SRCDIR}/libgf16_linux_amd64.a -lstdc++ -lm
-#cgo linux,arm64 LDFLAGS: ${SRCDIR}/libgf16_linux_arm64.a -lstdc++ -lm
-#cgo windows,amd64 LDFLAGS: ${SRCDIR}/libgf16_windows_amd64.a -lstdc++ -lm
+// The compat archives are listed after -lstdc++ on purpose: they only get
+// extracted when the C++ runtime in use lacks the libstdc++-internal helpers
+// the GCC-built archives reference (e.g. cross-compiling with zig cc, which
+// links libc++). See csrc/stdcxx_compat.cpp.
+#cgo linux,amd64 LDFLAGS: ${SRCDIR}/libgf16_linux_amd64.a -lstdc++ -lm ${SRCDIR}/libgf16_compat_linux_amd64.a
+#cgo linux,arm64 LDFLAGS: ${SRCDIR}/libgf16_linux_arm64.a -lstdc++ -lm ${SRCDIR}/libgf16_compat_linux_arm64.a
+#cgo windows,amd64 LDFLAGS: ${SRCDIR}/libgf16_windows_amd64.a -lstdc++ -lm ${SRCDIR}/libgf16_compat_windows_amd64.a
 #include "bridge.h"
 #include <stdlib.h>
 */
