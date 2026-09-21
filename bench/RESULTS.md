@@ -40,6 +40,120 @@ verify-intact 1.3×, verify-damaged 3.3×, repair-missing 1.05×,
 repair-corrupt 1.11×. Repair memory is 1.5-1.9× theirs, down from 4.2×
 before the memory work; verify memory remains far above theirs (see below).
 
+## Rival survey: nzbfast parfast 1.6.0 (2026-09-21)
+
+Same host (Apple M4, 10 cores). A fresh 1000 MiB set of 10 random
+100 MiB files, slice size 2,380,956, 450 data blocks, 68 recovery blocks
+(15%), created with stock par2cmdline 1.3.0 so no contestant's creator
+shaped the layout. Median of 3 reps (6 for the parfast default rows);
+gopar-turbo commit 72db3e2. [parfast](https://github.com/nzbfast/nzbfast)
+is nzbfast's pure-Rust PAR2 tool with par2cmdline's command dialect; it
+was run from the macOS universal release binary.
+
+| Scenario | Tool | Time | Peak RSS | Correct |
+|---|---|---:|---:|:---:|
+| verify-intact | gopar-turbo (cgo) | 1.04s | 225 MB | — |
+| | gopar-turbo (pure Go) | 1.17s | 266 MB | — |
+| | par2cmdline-turbo | 1.12s | 10 MB | — |
+| | **parfast** | **0.22s** | 10 MB | — |
+| | parfast --slow | 0.18s | 10 MB | — |
+| verify-damaged (50 slices) | gopar-turbo (cgo) | 0.80s | 236 MB | — |
+| | gopar-turbo (pure Go) | 0.85s | 266 MB | — |
+| | par2cmdline-turbo | 2.67s | 10 MB | — |
+| | **parfast** | **0.24s** | 41 MB | — |
+| | parfast --slow | 0.12s | 31 MB | — |
+| repair-missing (1 file) | gopar-turbo (cgo) | 1.27s | 369 MB | yes |
+| | gopar-turbo (pure Go) | 7.79s | 195 MB | yes |
+| | par2cmdline-turbo | 1.40s | 184 MB | yes |
+| | **parfast** | **0.63s** | 482 MB | yes |
+| repair-corrupt (50 slices) | gopar-turbo (cgo) | 3.49s | 400 MB | yes |
+| | gopar-turbo (pure Go) | 12.81s | 215 MB | yes |
+| | par2cmdline-turbo | 3.67s | 205 MB | yes |
+| | **parfast** | **1.00s** | 512 MB | yes |
+| | parfast --slow | 0.83s | 1.15 GB | yes |
+
+parfast is faster than gopar-turbo (cgo) on every scenario: verify-intact
+4.7×, verify-damaged 3.3×, repair-missing 2.0×, repair-corrupt 3.5×. Every
+parfast repair was byte-identical to the pristine set. Its `--slow` flag
+takes the verdict from the whole-file MD5 (as par2cmdline and gopar-turbo
+do) rather than its default per-block checksums; it is not slower here.
+
+### After the scan and repair pipeline work (same day)
+
+Same set, same host, same protocol, gopar-turbo rebuilt from this branch.
+Median of 3.
+
+| Scenario | gopar-turbo (cgo) | parfast | ratio |
+|---|---:|---:|---:|
+| verify-intact | 0.24s / 123 MB | 0.20s / 10 MB | 1.24× |
+| verify-damaged (50 slices) | 0.23s / 123 MB | 0.23s / 41 MB | 0.99× |
+| repair-missing (1 file) | 0.65s / 451 MB | 0.60s / 492 MB | 1.09× |
+| repair-corrupt (50 slices) | **0.74s** / 440 MB | 0.82s / 512 MB | **0.90×** |
+
+Every repair byte-identical to the pristine set. Against the numbers above
+that is verify 4.3× and 3.5× faster, repair 2.0× and 4.7× faster, with
+verify memory halved. The pure-Go backend now verifies as fast as the cgo
+one (0.25s), since verify never touches the kernels.
+
+What changed, none of it in the kernels:
+
+- **One hashing pass per byte.** The scan no longer computes a whole-file
+  MD5 alongside the per-slice MD5s: a file whose slices all match at their
+  canonical offsets is byte-for-byte the original. The rolling-CRC table
+  for the misaligned search was being rebuilt per scanned window (ten
+  2.4 MB hashes each time); it is now built once per slice size, only when
+  that search runs.
+- **Window-granular parallelism.** Files are walked in slice-aligned
+  windows over one shared worker pool instead of one worker per file, so a
+  few large files still use every core, and on asymmetric CPUs (this M4
+  has 4 performance and 6 efficiency cores) a whole file is never pinned to
+  a slow core.
+- **Parallel recovery-volume load.** Volumes were read and hash-checked on
+  one goroutine while the scan had the rest; at 160 MB of recovery data
+  that took longer than the scan itself. Packets now load on the worker
+  pool, and verify reads only recovery packet headers and exponents
+  (repair still hash-checks every packet before using it).
+- **Repair from a clone.** On APFS and Linux reflink filesystems the
+  rewrite starts from a copy-on-write clone of the damaged file and writes
+  only the reconstructed or relocated slices, instead of copying every
+  surviving slice into a fresh temp file. The post-write check covers
+  exactly the slices written (`DoubleCheck` still re-verifies whole files).
+  Elsewhere the copy path remains, now parallel across files.
+- **Concurrent fold input loading and parallel commit.** Reconstruction
+  loads and prepares each batch of inputs on several goroutines
+  (`rsec16.FoldInputsParallel`); commits and post-write checks run across
+  files instead of one at a time.
+
+The remaining verify gap is the recovery-volume header walk plus scan
+setup; the scan alone measures 0.20s, parfast's number.
+
+### Where the verify gap comes from
+
+CPU time, not parallelism. On the intact set (`time`, warm cache):
+
+| Tool | user CPU | CPU utilisation | wall |
+|---|---:|---:|---:|
+| `md5` CLI, 10 files in parallel (floor) | 1.47s | 508% | 0.34s |
+| parfast | 1.50s | 770% | 0.21s |
+| par2cmdline-turbo | 1.45s | 174% | 0.88s |
+| gopar-turbo (cgo) | 4.73s | 711% | 0.71s |
+
+parfast and par2cmdline-turbo both spend exactly the cost of one MD5 pass
+over the data; parfast simply spreads it over all cores. gopar-turbo
+already has the parallelism but burns **3.2× the CPU** of a single MD5
+pass, so the scan is doing redundant hashing work (whole-file MD5 plus
+per-slice MD5 plus the rolling CRC window over the same bytes). That is
+the lever: cutting the verify scan to one hashing pass per byte would put
+verify at parity with parfast without touching the kernels.
+
+Repair is a smaller gap and is dominated by the reconstruction loop, where
+parfast's fold and its single-plan scheduling win about 2-3.5× at this set
+size; the memory trade goes the other way (parfast peaks 1.3× higher on
+repair-missing, and 2.9× higher with `--slow` on repair-corrupt).
+
+Reproduce: `bench/run.py ... --parfast /path/to/parfast` adds both parfast
+rows; `--skip-tools stock,misalign` was used here.
+
 ## Scaled set, 1 GiB
 
 Same slice size and redundancy, first 10 parts. Median of 3 reps.

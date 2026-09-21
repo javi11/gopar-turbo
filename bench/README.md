@@ -70,6 +70,11 @@ python3 bench/run.py \
   --slice-size 2380956 --reps 3 --missing-files 5 --corrupt-slices 200
 ```
 
+`--parfast /path/to/parfast` optionally adds [nzbfast's parfast](https://github.com/nzbfast/nzbfast/releases)
+as two extra arms: its default (per-block checksum verdicts) and `--slow`
+(whole-file MD5 verdicts, like the other tools). It speaks par2cmdline's
+argument dialect, so it takes the same argv shape as the turbo arm.
+
 `--pristine` must contain the data files and the whole PAR2 set, and must
 never be written to — the driver only ever clones out of it.
 

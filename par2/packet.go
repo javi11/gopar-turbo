@@ -62,11 +62,15 @@ type recoverySetID [16]byte
 type packetType [16]byte
 
 func computePacketHash(setID recoverySetID, packetType packetType, body []byte) [md5.Size]byte {
-	var hashInput []byte
-	hashInput = append(hashInput, setID[:]...)
-	hashInput = append(hashInput, packetType[:]...)
-	hashInput = append(hashInput, body...)
-	return md5.Sum(hashInput)
+	// Streamed rather than concatenated: recovery packet bodies are a
+	// whole slice, and copying one just to hash it doubled the work.
+	h := md5.New()
+	h.Write(setID[:])
+	h.Write(packetType[:])
+	h.Write(body)
+	var sum [md5.Size]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
 }
 
 func readNextPacket(buf *bytes.Buffer) (recoverySetID, packetType, []byte, error) {

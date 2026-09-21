@@ -69,7 +69,9 @@ per *missing* shard, re-reading survivors and recovery blocks from disk rather
 than holding them, and streaming each rebuilt chunk range straight into the
 output file instead of assembling whole files in memory. Repaired files are
 written to temporary siblings and renamed on success, so an aborted repair
-leaves the originals untouched.
+leaves the originals untouched. On APFS and Linux reflink filesystems the
+temporary is a copy-on-write clone of the damaged file, so only the
+reconstructed slices are actually written.
 
 Accumulators default to at most 256 MB; `MemoryBudget` lowers that further,
 splitting slices into byte ranges and making several passes over the inputs:
