@@ -31,6 +31,22 @@ const foldBatchSize = 16
 //
 // Every row of out is fully overwritten and must be sliceSize bytes long.
 func FoldInputs(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, buf []byte) error, out [][]byte, numGoroutines int) error {
+	return foldInputs(m, numInputs, sliceSize, next, out, numGoroutines, false)
+}
+
+// FoldInputsParallel is FoldInputs with concurrent input loading: next may
+// be called from up to numGoroutines goroutines at once, for distinct j,
+// so it must be safe for concurrent use and must not share scratch state
+// between calls. Inputs are still consumed in ascending batches of j.
+//
+// Use it when next does I/O: a fold over inputs re-read from disk is
+// otherwise bounded by one goroutine reading and preparing every input
+// while the kernels wait.
+func FoldInputsParallel(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, buf []byte) error, out [][]byte, numGoroutines int) error {
+	return foldInputs(m, numInputs, sliceSize, next, out, numGoroutines, true)
+}
+
+func foldInputs(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, buf []byte) error, out [][]byte, numGoroutines int, parallelRead bool) error {
 	if len(out) == 0 || numInputs == 0 {
 		return nil
 	}
@@ -38,7 +54,7 @@ func FoldInputs(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, buf 
 		numGoroutines = 1
 	}
 	if gf16.Accelerated() {
-		return foldInputsGF16(m, numInputs, sliceSize, next, out, numGoroutines)
+		return foldInputsGF16(m, numInputs, sliceSize, next, out, numGoroutines, parallelRead)
 	}
 	return foldInputsPureGo(m, numInputs, sliceSize, next, out, numGoroutines)
 }
@@ -55,7 +71,7 @@ type foldUnit struct {
 	done   *sync.WaitGroup
 }
 
-func foldInputsGF16(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, buf []byte) error, out [][]byte, numGoroutines int) error {
+func foldInputsGF16(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, buf []byte) error, out [][]byte, numGoroutines int, parallelRead bool) error {
 	ctx, err := gf16.NewContext(sliceSize)
 	if err != nil {
 		return err
@@ -136,26 +152,62 @@ func foldInputsGF16(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, 
 		}(workerCtxs[w])
 	}
 
-	// readBank fills bank with up to B prepared inputs starting at *jp,
-	// returning the count and per-row coefficient slices. It is only ever
-	// running in one goroutine at a time, so next stays sequential and the
-	// raw scratch buffer is safely shared.
-	raw := make([]byte, sliceSize)
+	// readBank fills bank with up to B prepared inputs starting at nextJ,
+	// returning the count and per-row coefficient slices. Only one readBank
+	// runs at a time. Sequentially, next sees j in order from one goroutine
+	// and one raw scratch buffer is shared; with parallelRead the batch's
+	// inputs are loaded and prepared concurrently, each into its own raw
+	// buffer (Prepare is stateless), bounded by numGoroutines.
+	rawCount := 1
+	if parallelRead {
+		rawCount = B
+	}
+	raws := make([][]byte, rawCount)
+	for i := range raws {
+		raws[i] = make([]byte, sliceSize)
+	}
+	loadOne := func(j int, raw, dst []byte) error {
+		clear(raw)
+		if err := next(j, raw); err != nil {
+			return err
+		}
+		ctx.Prepare(dst, raw)
+		return nil
+	}
 	nextJ := 0
 	readBank := func(bank [][]byte) (int, [][]uint16, error) {
-		n := 0
 		base := nextJ
-		for ; n < B && nextJ < numInputs; n++ {
-			clear(raw)
-			if err := next(nextJ, raw); err != nil {
-				return 0, nil, err
-			}
-			ctx.Prepare(bank[n], raw)
-			nextJ++
-		}
-		if n == 0 {
+		n := min(B, numInputs-nextJ)
+		if n <= 0 {
 			return 0, nil, nil
 		}
+		if parallelRead && n > 1 {
+			errs := make([]error, n)
+			sem := make(chan struct{}, numGoroutines)
+			var wg sync.WaitGroup
+			for b := 0; b < n; b++ {
+				wg.Add(1)
+				sem <- struct{}{}
+				go func(b int) {
+					defer wg.Done()
+					defer func() { <-sem }()
+					errs[b] = loadOne(base+b, raws[b], bank[b])
+				}(b)
+			}
+			wg.Wait()
+			for _, err := range errs {
+				if err != nil {
+					return 0, nil, err
+				}
+			}
+		} else {
+			for b := 0; b < n; b++ {
+				if err := loadOne(base+b, raws[0], bank[b]); err != nil {
+					return 0, nil, err
+				}
+			}
+		}
+		nextJ += n
 		coeffs := make([][]uint16, len(out))
 		for i := range out {
 			coeffs[i] = make([]uint16, n)

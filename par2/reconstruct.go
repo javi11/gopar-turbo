@@ -3,6 +3,7 @@ package par2
 import (
 	"errors"
 	"io"
+	"sync"
 
 	"github.com/javi11/gopar-turbo/rsec16"
 )
@@ -14,13 +15,21 @@ type parityLocation struct {
 	path   string
 	offset int64
 	length int
+	// vol is the index of the volume (in match order) the block was taken
+	// from, so a parallel load still lets the first volume win duplicates.
+	vol int
 }
 
 // readerCache keeps data files open for the duration of a reconstruction.
 // Reconstruction reads every surviving shard once per chunk pass, so reopening
 // a file per shard would dominate the cost.
+//
+// The cache is safe for concurrent use: reconstruction loads fold inputs from
+// several goroutines. Opening is serialized by mu; ReadAt on an open reader
+// is concurrency-safe by contract.
 type readerCache struct {
 	d       *Decoder
+	mu      sync.Mutex
 	readers map[string]io.ReaderAt
 	sizes   map[string]int64
 	closers []func() error
@@ -36,6 +45,8 @@ func newReaderCache(d *Decoder) *readerCache {
 
 // getPath opens path once and keeps it open for the cache's lifetime.
 func (c *readerCache) getPath(path string) (io.ReaderAt, int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if r, ok := c.readers[path]; ok {
 		return r, c.sizes[path], nil
 	}
@@ -76,6 +87,8 @@ func (c *readerCache) readAbs(path string, off int64, buf []byte) error {
 }
 
 func (c *readerCache) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for _, closeFn := range c.closers {
 		_ = closeFn()
 	}
@@ -240,7 +253,10 @@ func (d *Decoder) reconstructTo(cache *readerCache, preserved map[int][]byte, si
 			out[i] = out[i][:n]
 		}
 
-		err := rsec16.FoldInputs(m, len(inputs), n, func(j int, buf []byte) error {
+		// Inputs are re-read from disk, so they are loaded concurrently:
+		// the closure touches only read-only plan state and the
+		// concurrency-safe cache.
+		err := rsec16.FoldInputsParallel(m, len(inputs), n, func(j int, buf []byte) error {
 			in := inputs[j]
 			if in.isParity {
 				loc := d.parityLocations[in.parityIdx]

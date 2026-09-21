@@ -2,7 +2,23 @@ package par2
 
 import (
 	"hash/crc32"
+	"sync"
 )
+
+// crc32Windows caches one crc32Window per window size. Building a window
+// hashes ten buffers of windowSize+1 zero bytes, which for a 2 MiB slice is
+// ~24 MB of CRC work; the table depends only on the size, so it is built
+// once per process rather than once per scanned buffer.
+var crc32Windows sync.Map // int -> *crc32Window
+
+// crc32WindowFor returns the cached rolling-CRC window for windowSize.
+func crc32WindowFor(windowSize int) *crc32Window {
+	if w, ok := crc32Windows.Load(windowSize); ok {
+		return w.(*crc32Window)
+	}
+	w, _ := crc32Windows.LoadOrStore(windowSize, newCRC32Window(windowSize))
+	return w.(*crc32Window)
+}
 
 type crc32Window struct {
 	windowSize              int

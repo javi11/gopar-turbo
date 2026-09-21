@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // RootDir returns a string representing a root directory. On
@@ -45,15 +46,20 @@ func toAbsPath(workingDir, path string) string {
 
 // MemFS is a simple in-memory filesystem with a working
 // directory. It's intended mainly for testing.
+//
+// A MemFS is safe for concurrent use: the file map is guarded by a mutex
+// shared by every copy of the value, since repair commits and scans files
+// from several goroutines.
 type MemFS struct {
 	workingDir string
 	fileData   map[string][]byte
+	mu         *sync.Mutex
 }
 
 // MakeMemFS makes a MemFS from the given working directory and file
 // data.
 func MakeMemFS(workingDir string, fileData map[string][]byte) MemFS {
-	return MemFS{workingDir, fileDataToAbsPaths(workingDir, fileData)}
+	return MemFS{workingDir, fileDataToAbsPaths(workingDir, fileData), &sync.Mutex{}}
 }
 
 // ReadFile returns the data of the file at the given path, which may
@@ -61,6 +67,8 @@ func MakeMemFS(workingDir string, fileData map[string][]byte) MemFS {
 // doesn't exist, os.ErrNotExist is returned.
 func (fs MemFS) ReadFile(path string) (data []byte, err error) {
 	absPath := toAbsPath(fs.workingDir, path)
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	if data, ok := fs.fileData[absPath]; ok {
 		return data, nil
 	}
@@ -91,17 +99,23 @@ func (fs MemFS) WriteFile(path string, data []byte) error {
 	// mutation silently rewrite an already-written file.
 	stored := make([]byte, len(data))
 	copy(stored, data)
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	fs.fileData[absPath] = stored
 	return nil
 }
 
 // FileCount returns the total number of files.
 func (fs MemFS) FileCount() int {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	return len(fs.fileData)
 }
 
 // Paths returns a list of absolute paths of files in fs in no particular order.
 func (fs MemFS) Paths() []string {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	var paths []string
 	for path := range fs.fileData {
 		paths = append(paths, path)
@@ -118,6 +132,8 @@ func (fs MemFS) RemoveFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	delete(fs.fileData, absPath)
 	return data, nil
 }
@@ -158,6 +174,25 @@ func (w *memWriter) WriteAt(p []byte, off int64) (int, error) {
 	}
 	copy(w.data[off:], p)
 	return len(p), nil
+}
+
+// OpenPatch starts a size-byte rewrite of path from a copy of its current
+// contents, mirroring the clone-based patch path of the real filesystem.
+// It fails if path does not exist.
+func (fs MemFS) OpenPatch(path string, size int64) (io.WriterAt, func(commit bool) error, error) {
+	old, err := fs.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	data := make([]byte, size)
+	copy(data, old)
+	w := &memWriter{fs: fs, path: path, data: data}
+	return w, func(commit bool) error {
+		if !commit {
+			return nil
+		}
+		return fs.WriteFile(w.path, w.data)
+	}, nil
 }
 
 // OpenWrite starts a size-byte write of path. Writes land in a private buffer;

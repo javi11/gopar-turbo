@@ -16,6 +16,8 @@ TOOL_ORDER = [
     "par2cmdline-turbo",
     "par2turbo -N (misalign)",
     "par2cmdline (stock)",
+    "parfast",
+    "parfast --slow",
 ]
 SCENARIO_ORDER = ["verify-intact", "verify-damaged", "repair-missing", "repair-corrupt"]
 

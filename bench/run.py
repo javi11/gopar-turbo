@@ -130,13 +130,21 @@ def build_tools(args):
     # slice miss (par2/decoder.go fillShardInfos), whereas par2cmdline gates
     # that behind -N. The "-N" row is the like-for-like damaged comparison;
     # the plain row is each tool's default behaviour.
-    return [
+    tools = [
         ("gopar-turbo (cgo/SIMD)", lambda op, idx: [args.gopar_cgo, "-op", op, "-par", idx]),
         ("gopar-turbo (pure Go)",  lambda op, idx: [args.gopar_pure, "-op", op, "-par", idx]),
         ("par2cmdline-turbo",      lambda op, idx: [args.par2_turbo, op, "-q", idx]),
         ("par2cmdline (stock)",    lambda op, idx: [args.par2_stock, op, "-q", idx]),
         ("par2turbo -N (misalign)", lambda op, idx: [args.par2_turbo, op, "-q", "-N", idx]),
     ]
+    if args.parfast:
+        # nzbfast's parfast (pure-Rust engine) speaks par2cmdline's dialect
+        # and exit codes, so it takes the same argv shape as the turbo arm.
+        tools.append(("parfast", lambda op, idx: [args.parfast, op, "-q", idx]))
+        # parfast's default verdict comes from per-block checksums; --slow
+        # uses the whole-file MD5 like the other tools, for a like-for-like row.
+        tools.append(("parfast --slow", lambda op, idx: [args.parfast, op, "-q", "--slow", idx]))
+    return tools
 
 
 def main():
@@ -150,6 +158,8 @@ def main():
     ap.add_argument("--gopar-pure", required=True)
     ap.add_argument("--par2-turbo", required=True)
     ap.add_argument("--par2-stock", default="/opt/homebrew/bin/par2")
+    ap.add_argument("--parfast", default="",
+                    help="optional: nzbfast parfast binary to add as an arm")
     ap.add_argument("--slice-size", type=int, default=2380956)
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--reps", type=int, default=1)
