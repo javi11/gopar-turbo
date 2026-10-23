@@ -234,3 +234,223 @@ The release as downloaded was **damaged**: 20 files, 41 of 1965 blocks lost to
 Usenet article loss, independently confirmed by par2cmdline-turbo. It was
 repaired before benchmarking. A baseline taken from damaged files scores every
 correct repair as a mismatch, so verify the set is clean before trusting a run.
+
+## 2026-10-21: large-repair scaling
+
+Compared baseline `680a5da` against the repair performance changes on an Apple
+M4 (darwin/arm64). These are component benchmarks, not a reproduction of the
+reported hour-long production repair. Both versions ran the same benchmark
+functions sequentially, using `-benchtime=3x -count=1` with cgo enabled:
+
+| Benchmark | Baseline | Updated |
+|---|---:|---:|
+| Reconstruct 1,000 × 64 KiB, 50 missing | 36.81 ms | 30.64 ms |
+| Reconstruction matrix: 10,000 data, 1,024 missing | 4.916 s | 1.327 s |
+| Streaming fold: 256 inputs, 28 outputs, 2,380,956-byte slices | 105.24 ms | 110.67 ms |
+| Parallel fold: 32 inputs, one output, 4 MiB slices | 9.00 ms | 6.52 ms |
+| Allocations for that 4 MiB fold | 210.02 MB/op | 21.01 MB/op |
+
+The ordinary streaming fold is approximately unchanged at this sample size;
+no end-to-end speed claim follows from these component numbers. Matrix setup
+improved about 3.7×, and large-slice folding allocates about 90% fewer bytes.
+A separate one-iteration pure-Go matrix comparison measured 4.926 s before and
+2.665 s after; that smaller sample should be treated as indicative.
+
+The deterministic parity-check read counter uses 8,229 data bytes, 1,024-byte
+slices, a 128-byte budget and 32 recovery exponents. Before the change it read
+2,106,624 data bytes; afterward it reads exactly 8,229 bytes across all chunk
+passes. The same check passes with only exponent 31 available, and still
+rejects corrupt stored parity. The updated calculation includes only present
+recovery rows. Another end-to-end test covers exponent 65535, which previously
+overflowed while growing the recovery-location arrays.
+
+Chunk sizing now accounts for bulk input and output folding buffers. The
+256 MiB budget remains the default, but explicit larger budgets are honored
+so callers can reduce positional I/O on large sets. This budget excludes
+matrices, scanner windows, native contexts and metadata; it is not an RSS cap.
+Small budgets permit minimum/alignment overhead. Pure-Go budgeting reflects
+its smaller buffer set.
+
+Reproduce the component comparison with:
+
+```sh
+go test ./rsec16 -run '^$' \
+  -bench 'Benchmark(FoldInputs_Realistic|FoldInputsParallelLargeSlice|Reconstruct_1000x50_64K|ReconstructionMatrixHeavyDamage)$' \
+  -benchtime=3x -count=1
+```
+
+For baseline comparison, add the new benchmark entry points to a checkout of
+`680a5da` and keep its production implementation unchanged. Cold HDD/network
+storage and production repair concurrency remain unmeasured. Byte-identical
+heavy-damage repairs, partial final slices, adaptive-batch partial reads and
+errors, sparse exponents, and the optimized matrix solver are regression tested.
+
+## 2026-10-22: deep repair transform versus parfast 1.7.1
+
+Apple M4, darwin/arm64, 10 workers, cgo CLMul(SHA3), warm APFS storage.
+The deterministic fixture contains 10,000 × 16 KiB data blocks (156.25 MiB)
+and 8,192 recovery blocks. Seed 1337 selects distinct blocks to damage, with
+64 bytes overwritten in each. Every run starts from a fresh clone, reads the
+set into cache, repairs in a separate process and validates all ten data files
+with SHA-256. Times include the complete repair command. Staging, cache warming
+and checksum validation are excluded. Defaults are used for both tools; Go's
+bulk buffer budget is 256 MiB, and memory budgets are not equalized.
+
+Three sequential runs per tool/depth, alternating tool order, give these
+medians. All 24 repairs passed checksum validation:
+
+| Missing blocks | gopar transform | parfast 1.7.1 | gopar peak RSS | parfast peak RSS |
+|---|---:|---:|---:|---:|
+| 1,024 | 1.882 s | 0.374 s | 378.4 MiB | 379.9 MiB |
+| 2,048 | 2.115 s | 0.463 s | 383.9 MiB | 507.5 MiB |
+| 4,096 | 2.446 s | 0.690 s | 388.2 MiB | 706.5 MiB |
+| 8,192 | 3.264 s | 1.104 s | 396.0 MiB | 878.5 MiB |
+
+Before the transform, the already-improved matrix implementation measured
+4.552 s at 1,024 missing and 13.719 s at 2,048 missing on the same seeded
+fixture (single preliminary samples, not medians). The old cubic planner was
+not run at the deepest two depths. These comparisons indicate substantial
+improvement, but **parfast remains approximately 3–5× faster** on this fixture.
+The transform's fixed full-field passes are still expensive. The reported
+hour-long production case has not been reproduced, and cold disks, network
+storage, concurrent repairs and other CPUs remain unmeasured.
+
+The solver uses independently implemented Cantor-basis additive transforms,
+closed-form consecutive-exponent coefficients, batched SIMD operations and a
+reused native workspace. Irregular exponent sets retain matrix decoding.
+A checksum-correct rational survivor product-tree experiment was removed
+because it did not consistently improve runtime. Fixed smaller byte chunks
+also failed to improve runtime consistently; chunk sizing remains budget-based.
+
+Reproduce using `bench/deep.py` and the fixture commands in
+[bench/README.md](README.md). The downloaded parfast macOS universal 1.7.1
+archive SHA-256 was
+`2301bd89c0d57505f5adbba17261b9ee334c17777265983c6dca5f77c3da81a8`.
+The harness writes binary/fixture hashes, exact arguments, per-run logs,
+exit/timeout status, checksum results, wall time and peak RSS. Failed runs
+are explicitly marked invalid and cause a nonzero harness exit.
+
+A separate pure-Go threshold check (one run per case, same fixture) measured
+12.818 → 3.535 s at 1,024 missing and 24.411 → 3.262 s at 2,048 missing
+when switching from the new closed-form matrix path to the transform. All
+four repairs passed SHA-256. This supports using the transform threshold on
+this pure-Go platform too; the smaller sample does not establish portable
+speedups. The matrix variant changed only transform selection.
+
+Raw repeated cgo runs and fixture/binary hashes are preserved in
+[deep-results-2026-10-22.json](deep-results-2026-10-22.json).
+
+
+## 2026-10-23: transposed moments, parallel writes and lazy tables
+
+These results supersede the historical full-field transform measurements above.
+Apple M4, darwin/arm64, Go 1.27.0, native CLMul(SHA3), 10 workers, warm APFS.
+Both fixtures contain 10,000 data blocks and 8,192 recovery blocks: 156.25 MiB
+of data with 16 KiB blocks and 1.221 GiB with 128 KiB blocks. Damage, fresh
+clones, complete-command timing and SHA-256 validation follow the earlier
+method. Binaries were warmed before timing. Each tool uses its defaults:
+gopar has a 512 MiB bulk buffer budget; parfast's budget is not equalized.
+Budgets exclude metadata and are not RSS caps.
+
+Three sequential repetitions per tool/depth alternate tool order. All **48
+repairs passed SHA-256 validation**. Tables show median wall time and median
+per-process peak RSS. Individual runs vary; all samples are preserved.
+
+### 16KiB blocks
+
+| Missing blocks | gopar | parfast 1.7.1 | gopar peak RSS | parfast peak RSS |
+|---|---:|---:|---:|---:|
+| 1,024 | 0.480 s | 0.400 s | 225.8 MiB | 381.3 MiB |
+| 2,048 | 0.604 s | 0.486 s | 242.0 MiB | 510.1 MiB |
+| 4,096 | 0.813 s | 0.698 s | 292.5 MiB | 702.3 MiB |
+| 8,192 | 1.241 s | 1.213 s | 401.2 MiB | 878.0 MiB |
+
+### 128KiB blocks
+
+| Missing blocks | gopar | parfast 1.7.1 | gopar peak RSS | parfast peak RSS |
+|---|---:|---:|---:|---:|
+| 1,024 | 2.210 s | 2.889 s | 527.6 MiB | 1496.8 MiB |
+| 2,048 | 2.785 s | 3.125 s | 529.9 MiB | 1709.0 MiB |
+| 4,096 | 3.616 s | 4.224 s | 519.6 MiB | 2102.6 MiB |
+| 8,192 | 5.776 s | 6.993 s | 540.1 MiB | 2297.4 MiB |
+
+The degree-limited solver, fused SIMD operations, reused workspaces, batched
+parity reads, aligned chunks and concurrent writes across files remove much
+of the earlier deep-repair overhead. Lazy generic multiplication tables avoid
+initializing 64 MiB that native repair does not need.
+
+The larger fixture now beats parfast at every measured depth. The smaller
+fixture remains approximately 2–24% slower, so the goal of matching parfast
+across the entire measured ladder is **not yet met**. These measurements do
+not reproduce the reported hour-long repair or establish performance on cold
+HDDs, network storage, concurrent jobs, other CPUs or irregular exponent sets.
+Irregular exponents retain the general matrix fallback.
+
+Validation includes the full native and pure-Go suites, race checks covering
+GF arithmetic and repair, repeated strict-cgo/aggressive-GC checks, vet for
+both backends, and an amd64 pure-Go test-binary cross-build (not executed).
+Independent reviews covered solver arithmetic, native lifetimes, parallel
+writes and lazy table publication. The concurrent write failure test checks
+that all writes finish before abort and that failed repairs do not commit.
+
+Reproduce with [deep.py](deep.py) and [the fixture instructions](README.md).
+Final binary/fixture hashes, arguments and all 48 samples are in
+[deep-results-2026-10-23.json](deep-results-2026-10-23.json).
+
+
+## 2026-10-24: direct metadata decoding and batched output writes
+
+These results supersede the remaining small-fixture gap above. Fixed-layout
+packet-header and IFSC decoding removes repeated reflection work. Reconstructed
+rows share a contiguous output bank, allowing complete adjacent slices in one
+file to share bounded writes without an additional copy. Header/hash validation,
+owned checksum fields, partial-chunk writes and final-file trimming are preserved.
+
+Same Apple M4, Go 1.27.0, native backend, 10 workers and warm APFS methodology
+as above. Three repetitions alternate tool order, comparing the candidate with
+commit `b38267b` and parfast 1.7.1. Each tool uses its default memory budget.
+All **72 repairs passed SHA-256 validation**. Values below are medians; CPU-s
+is process user plus system CPU time across all threads, not peak CPU utilization.
+
+| Block size | Missing | Previous time | New time | parfast time | Previous CPU-s | New CPU-s |
+|---|---:|---:|---:|---:|---:|---:|
+| 16KiB | 1,024 | 0.474 s | 0.360 s | 0.364 s | 2.630 | 2.557 |
+| 16KiB | 2,048 | 0.574 s | 0.474 s | 0.474 s | 3.533 | 3.330 |
+| 16KiB | 4,096 | 0.771 s | 0.663 s | 0.738 s | 5.043 | 4.884 |
+| 16KiB | 8,192 | 1.310 s | 1.119 s | 1.177 s | 7.703 | 7.461 |
+| 128KiB | 1,024 | 2.208 s | 2.278 s | 3.121 s | 16.373 | 16.327 |
+| 128KiB | 2,048 | 2.782 s | 2.753 s | 3.477 s | 20.678 | 20.722 |
+| 128KiB | 4,096 | 3.681 s | 3.742 s | 4.634 s | 28.850 | 28.200 |
+| 128KiB | 8,192 | 6.550 s | 6.667 s | 7.094 s | 45.387 | 44.667 |
+
+The candidate matches or beats parfast's median wall time at every measured
+depth: approximately tied to 10% faster for 16 KiB blocks and 6–27% faster
+for 128 KiB blocks. This meets the benchmark parity target on these fixtures;
+the near-ties are not evidence of a statistically significant advantage.
+
+Against our previous binary, the small fixture is 14–24% faster and uses
+2.8–5.7% fewer CPU-seconds. Large-fixture wall time varies from 1.1% faster
+to 3.2% slower; CPU time varies from 2.3% lower to 0.2% higher. Those small
+changes do not establish a consistent CPU saving without slowdown on large
+repairs. The worker default remains unchanged. Lower worker counts can save
+more CPU with workload-dependent slowdowns; see [CPU_RESULTS.md](CPU_RESULTS.md).
+Faster completion also does not imply a lower instantaneous CPU percentage.
+
+Median candidate peak RSS ranges from 245.6–403.1 MiB on the small fixture
+and 531.1–555.7 MiB on the large fixture, versus parfast's 375.2–881.5 MiB
+and 1368.5–2225.6 MiB respectively. Bulk budgets are not RSS caps.
+
+The reported hour-long repair was not reproduced. Cold HDDs, network storage,
+concurrent jobs, other CPUs and irregular exponent performance remain outside
+this comparison. Irregular exponents retain the tested matrix fallback.
+
+Raw per-run wall/CPU/RSS values, exact arguments and binary/fixture hashes are
+in [deep-results-2026-10-24.json](deep-results-2026-10-24.json). Reproduce with
+`deep.py --baseline-gopar <previous-binary>` and the existing fixture commands.
+
+Validation for this final change: full native and pure-Go test suites, repair
+race tests and vet for both backends pass. Tests cover metadata truncation and
+ownership, partial output chunks, final-file clipping, the 1 MiB batch limit
+and individual slices larger than that limit. Independent read-only review
+found no correctness blocker. A fresh build has the same SHA-256 as the timed
+candidate binary.

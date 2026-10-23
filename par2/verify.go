@@ -33,12 +33,12 @@ type VerifyOptions struct {
 	// slice. Zero means unbounded. Ignored when FindMisalignedData
 	// is false.
 	MisalignedSearchLimit int
-	// MemoryBudget caps the bytes held for reconstruction accumulators.
-	// Zero selects a default capped at 256 MB; chunked passes at that size
-	// are measured to cost no wall-clock, so larger values buy nothing.
-	// When the budget is smaller than one accumulator per missing shard,
-	// repair splits slices into byte ranges and makes several passes over
-	// the inputs rather than exceeding it.
+	// MemoryBudget selects the approximate budget for bulk reconstruction
+	// buffers, including input staging and prepared/output accumulators.
+	// Zero uses up to 256 MiB. Larger explicit values reduce chunk passes
+	// and scattered I/O on large repairs. Matrices, scan buffers, metadata
+	// and native contexts are additional; this is not a process memory cap.
+	// Very small budgets still require minimum-sized, aligned buffers.
 	MemoryBudget int
 }
 

@@ -1,0 +1,451 @@
+{
+  "manifest": {
+    "fixture_sha256": {
+      "data00.bin": "08458f20d9d930dcb611e5f0e4a3c5bb7effeb78fb1db5ef24769dc59bebae08",
+      "data01.bin": "e68462c02d138747d978a1e8af08f94f9069c6f1d81904bd00883c064dbaacfc",
+      "data02.bin": "8eacaea083f13c6be2c4e034a17b98dae6f80b6401bef61282d8f9f474d9e276",
+      "data03.bin": "669792672313868d248a043ecdd021e37ef3308de76cf6cb3fc6bd1afec902e9",
+      "data04.bin": "72fbdf28c48cde1bff7fdbebc0205f8e0d20edc9d94d6cff02c9130e220ee89e",
+      "data05.bin": "1f795c3247bbd8ac47378b35a498d13afae6e69682a7da7713c48b816027fbb8",
+      "data06.bin": "f263dc0513f28d2d62c21c1256605d25775790c707d7c4f14257ba11c16888be",
+      "data07.bin": "08dade7cd122855cf1a073ab7bb9fc835a13d6114fcd8b075382fc3651fa25e3",
+      "data08.bin": "ff318a4f33ec1fc2ffff3d09b7af73c7153adc513993fb4dc249b7b2f099bb02",
+      "data09.bin": "47f78c0dea39d73392e36935550f4fb1812ea2515c4a6200caeea54df0c941b2"
+    },
+    "data_shards": 10000,
+    "slice_size": 16384,
+    "damage_seed": 1337,
+    "tools": {
+      "parfast": {
+        "path": "/private/tmp/parfast-1.7.1-macos-universal/parfast",
+        "sha256": "021d003d83931ddb366e8010f1072d13fd714abd7f3e2a754b648208fd606964"
+      },
+      "gopar": {
+        "path": "/private/tmp/gopar-deep-bench/gopar-transform",
+        "sha256": "3994568fc65efae93a2373cb8c9154e7f8ce7e30aa206fbc2ab6bc6d2e886eec"
+      }
+    }
+  },
+  "runs": [
+    {
+      "seconds": 0.38103466702159494,
+      "peak_rss_bytes": 403439616,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "parfast",
+      "missing": 1024,
+      "repetition": 0,
+      "argv": [
+        "/private/tmp/parfast-1.7.1-macos-universal/parfast",
+        "repair",
+        "-q",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-m6jivw7m/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 2.2650392500218004,
+      "peak_rss_bytes": 395689984,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "gopar",
+      "missing": 1024,
+      "repetition": 0,
+      "argv": [
+        "/private/tmp/gopar-deep-bench/gopar-transform",
+        "-op",
+        "repair",
+        "-par",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-_x998pov/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 1.8824471670668572,
+      "peak_rss_bytes": 399179776,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "gopar",
+      "missing": 1024,
+      "repetition": 1,
+      "argv": [
+        "/private/tmp/gopar-deep-bench/gopar-transform",
+        "-op",
+        "repair",
+        "-par",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-05rzev38/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 0.3699885830283165,
+      "peak_rss_bytes": 397836288,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "parfast",
+      "missing": 1024,
+      "repetition": 1,
+      "argv": [
+        "/private/tmp/parfast-1.7.1-macos-universal/parfast",
+        "repair",
+        "-q",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-5te0lh2j/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 0.37377979198936373,
+      "peak_rss_bytes": 398393344,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "parfast",
+      "missing": 1024,
+      "repetition": 2,
+      "argv": [
+        "/private/tmp/parfast-1.7.1-macos-universal/parfast",
+        "repair",
+        "-q",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-afj20vss/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 1.855005457997322,
+      "peak_rss_bytes": 396754944,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "gopar",
+      "missing": 1024,
+      "repetition": 2,
+      "argv": [
+        "/private/tmp/gopar-deep-bench/gopar-transform",
+        "-op",
+        "repair",
+        "-par",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-hgntrl_i/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 0.45789324992801994,
+      "peak_rss_bytes": 535281664,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "parfast",
+      "missing": 2048,
+      "repetition": 0,
+      "argv": [
+        "/private/tmp/parfast-1.7.1-macos-universal/parfast",
+        "repair",
+        "-q",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-yxaap6br/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 2.120788750005886,
+      "peak_rss_bytes": 405766144,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "gopar",
+      "missing": 2048,
+      "repetition": 0,
+      "argv": [
+        "/private/tmp/gopar-deep-bench/gopar-transform",
+        "-op",
+        "repair",
+        "-par",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-3d_2pbsj/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 2.1151851249160245,
+      "peak_rss_bytes": 402358272,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "gopar",
+      "missing": 2048,
+      "repetition": 1,
+      "argv": [
+        "/private/tmp/gopar-deep-bench/gopar-transform",
+        "-op",
+        "repair",
+        "-par",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-we3k4rwv/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 0.4849544169846922,
+      "peak_rss_bytes": 532119552,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "parfast",
+      "missing": 2048,
+      "repetition": 1,
+      "argv": [
+        "/private/tmp/parfast-1.7.1-macos-universal/parfast",
+        "repair",
+        "-q",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-96rghimk/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 0.4630557500058785,
+      "peak_rss_bytes": 529678336,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "parfast",
+      "missing": 2048,
+      "repetition": 2,
+      "argv": [
+        "/private/tmp/parfast-1.7.1-macos-universal/parfast",
+        "repair",
+        "-q",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-7thba61j/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 2.1087102089077234,
+      "peak_rss_bytes": 402538496,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "gopar",
+      "missing": 2048,
+      "repetition": 2,
+      "argv": [
+        "/private/tmp/gopar-deep-bench/gopar-transform",
+        "-op",
+        "repair",
+        "-par",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-2fj27zp0/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 0.7069661249406636,
+      "peak_rss_bytes": 740769792,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "parfast",
+      "missing": 4096,
+      "repetition": 0,
+      "argv": [
+        "/private/tmp/parfast-1.7.1-macos-universal/parfast",
+        "repair",
+        "-q",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-h5_lm6v4/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 2.438046458060853,
+      "peak_rss_bytes": 404488192,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "gopar",
+      "missing": 4096,
+      "repetition": 0,
+      "argv": [
+        "/private/tmp/gopar-deep-bench/gopar-transform",
+        "-op",
+        "repair",
+        "-par",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-ue08_a8c/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 2.445715249981731,
+      "peak_rss_bytes": 408879104,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "gopar",
+      "missing": 4096,
+      "repetition": 1,
+      "argv": [
+        "/private/tmp/gopar-deep-bench/gopar-transform",
+        "-op",
+        "repair",
+        "-par",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-6ul9794z/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 0.6901827499968931,
+      "peak_rss_bytes": 741883904,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "parfast",
+      "missing": 4096,
+      "repetition": 1,
+      "argv": [
+        "/private/tmp/parfast-1.7.1-macos-universal/parfast",
+        "repair",
+        "-q",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-1ahqamqm/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 0.6792153329588473,
+      "peak_rss_bytes": 740737024,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "parfast",
+      "missing": 4096,
+      "repetition": 2,
+      "argv": [
+        "/private/tmp/parfast-1.7.1-macos-universal/parfast",
+        "repair",
+        "-q",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-aspnqc1i/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 2.4981919589918107,
+      "peak_rss_bytes": 407011328,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "gopar",
+      "missing": 4096,
+      "repetition": 2,
+      "argv": [
+        "/private/tmp/gopar-deep-bench/gopar-transform",
+        "-op",
+        "repair",
+        "-par",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-r5n148rc/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 1.1259225830435753,
+      "peak_rss_bytes": 922910720,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "parfast",
+      "missing": 8192,
+      "repetition": 0,
+      "argv": [
+        "/private/tmp/parfast-1.7.1-macos-universal/parfast",
+        "repair",
+        "-q",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-eezc36al/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 3.2636575830401853,
+      "peak_rss_bytes": 415252480,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "gopar",
+      "missing": 8192,
+      "repetition": 0,
+      "argv": [
+        "/private/tmp/gopar-deep-bench/gopar-transform",
+        "-op",
+        "repair",
+        "-par",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-up5at2wa/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 3.3189296249765903,
+      "peak_rss_bytes": 413679616,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "gopar",
+      "missing": 8192,
+      "repetition": 1,
+      "argv": [
+        "/private/tmp/gopar-deep-bench/gopar-transform",
+        "-op",
+        "repair",
+        "-par",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-12f2144e/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 1.094675707980059,
+      "peak_rss_bytes": 919044096,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "parfast",
+      "missing": 8192,
+      "repetition": 1,
+      "argv": [
+        "/private/tmp/parfast-1.7.1-macos-universal/parfast",
+        "repair",
+        "-q",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-zv_urodg/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 1.1036601250525564,
+      "peak_rss_bytes": 921157632,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "parfast",
+      "missing": 8192,
+      "repetition": 2,
+      "argv": [
+        "/private/tmp/parfast-1.7.1-macos-universal/parfast",
+        "repair",
+        "-q",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-ngnrl2be/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    },
+    {
+      "seconds": 3.2440852499566972,
+      "peak_rss_bytes": 417742848,
+      "exit_code": 0,
+      "timeout": false,
+      "tool": "gopar",
+      "missing": 8192,
+      "repetition": 2,
+      "argv": [
+        "/private/tmp/gopar-deep-bench/gopar-transform",
+        "-op",
+        "repair",
+        "-par",
+        "/var/folders/d3/1x0t7hms1cl49xk8rsxzz2740000gp/T/gopar-deep-oq_uknc4/work/recovery.par2"
+      ],
+      "checksum_ok": true,
+      "valid": true
+    }
+  ]
+}

@@ -110,11 +110,11 @@ func benchmarkMakeReconstructionMatrix(b *testing.B, newParityMatrixFn func(int,
 	for i := range availableRows {
 		availableRows[i] = parityShards + i
 	}
-	parityMatrix := newVandermondeParityMatrix(dataShards, parityShards)
+	parityMatrix := newParityMatrixFn(dataShards, parityShards)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := makeReconstructionMatrix(dataShards, availableRows, missingRows, usedParityRows, parityMatrix)
+		_, err := (Coder{dataShards: dataShards, parityMatrix: parityMatrix, numGoroutines: DefaultNumGoroutines()}).ReconstructionMatrix(availableRows, missingRows, usedParityRows)
 		require.NoError(b, err)
 	}
 }
@@ -266,3 +266,88 @@ func TestCoderReconstructDataNotEnough(t *testing.T) {
 }
 
 // TODO: Add tests demonstrating the flaws in the PAR2 Vandermonde matrix.
+
+// Independent full-system inversion checks row ordering and the optimized
+// wide multiplication, including non-contiguous recovery exponents.
+func TestReconstructionMatrixMixedRows(t *testing.T) {
+	for _, n := range []int{65, 129} {
+		for _, k := range []int{1, 5, 32} {
+			missing := make([]int, 0, k)
+			available := make([]int, 0, n-k)
+			for i := 0; i < n; i++ {
+				if i%2 == 0 && len(missing) < k {
+					missing = append(missing, i)
+				} else {
+					available = append(available, i)
+				}
+			}
+			used := make([]int, k)
+			for i := range used {
+				used[i] = 2*i + 1
+			}
+			parity := newCauchyParityMatrix(n, 2*k+1)
+			want, err := makeReconstructionMatrixNaive(n, available, missing, used, parity)
+			require.NoError(t, err)
+			got, err := (Coder{dataShards: n, parityMatrix: parity, numGoroutines: 4}).ReconstructionMatrix(available, missing, used)
+			require.NoError(t, err)
+			require.Equal(t, want, got)
+		}
+	}
+}
+
+func TestReconstructionMatrixSingular(t *testing.T) {
+	c := Coder{dataShards: 128, parityMatrix: gf2p16.NewZeroMatrix(32, 128), numGoroutines: 4}
+	missing, available, used := make([]int, 32), make([]int, 96), make([]int, 32)
+	for i := range missing {
+		missing[i] = i
+		used[i] = i
+	}
+	for i := range available {
+		available[i] = 32 + i
+	}
+	_, err := c.ReconstructionMatrix(available, missing, used)
+	require.Error(t, err)
+	_, err = makeReconstructionMatrix(4, []int{0, 1}, []int{2, 3}, []int{0, 1}, gf2p16.NewZeroMatrix(2, 4))
+	require.Error(t, err)
+}
+
+func BenchmarkReconstructionMatrixHeavyDamage(b *testing.B) {
+	benchmarkMakeReconstructionMatrix(b, newVandermondeParityMatrix, 10000, 1024)
+}
+
+func TestCoderPAR2SelectedRows(t *testing.T) {
+	rows := []int{31, 0, 65535, 3}
+	c, err := NewCoderPAR2VandermondeRows(17, rows, 2)
+	require.NoError(t, err)
+	for i, row := range rows {
+		for j := 0; j < 17; j++ {
+			require.Equal(t, generators[j].Pow(uint32(row)), c.ParityMatrix().At(i, j))
+		}
+	}
+	for _, row := range []int{-1, 65536} {
+		_, err := NewCoderPAR2VandermondeRows(17, []int{row}, 2)
+		require.Error(t, err)
+	}
+}
+
+func TestReconstructHeavyDamage(t *testing.T) {
+	for _, newCoder := range []func(int, int, int) (Coder, error){NewCoderCauchy, NewCoderPAR2Vandermonde} {
+		c, err := newCoder(129, 64, 4)
+		require.NoError(t, err)
+		data := make([][]byte, 129)
+		for i := range data {
+			data[i] = make([]byte, 126)
+			for j := range data[i] {
+				data[i][j] = byte(i*7 + j*31)
+			}
+		}
+		parity := c.GenerateParity(data)
+		damaged := append([][]byte(nil), data...)
+		for i := 0; i < 32; i++ {
+			damaged[2*i] = nil
+			parity[i] = nil
+		}
+		require.NoError(t, c.ReconstructData(damaged, parity))
+		require.Equal(t, data, damaged)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"errors"
+	"io"
 	"reflect"
 )
 
@@ -35,13 +36,23 @@ func checkPacketHeader(h packetHeader) error {
 }
 
 func readPacketHeader(buf *bytes.Buffer) (packetHeader, error) {
-	var h packetHeader
-	err := binary.Read(buf, binary.LittleEndian, &h)
-	if err != nil {
-		return packetHeader{}, err
+	// PAR2 headers have a fixed 64-byte wire layout. Next consumes partial
+	// headers too, preserving binary.Read's EOF and truncation behavior.
+	data := buf.Next(64)
+	if len(data) == 0 {
+		return packetHeader{}, io.EOF
 	}
+	if len(data) != 64 {
+		return packetHeader{}, io.ErrUnexpectedEOF
+	}
+	var h packetHeader
+	copy(h.Magic[:], data[:8])
+	h.Length = binary.LittleEndian.Uint64(data[8:16])
+	copy(h.Hash[:], data[16:32])
+	copy(h.RecoverySetID[:], data[32:48])
+	copy(h.Type[:], data[48:64])
 
-	err = checkPacketHeader(h)
+	err := checkPacketHeader(h)
 	if err != nil {
 		return packetHeader{}, err
 	}
@@ -74,6 +85,16 @@ func computePacketHash(setID recoverySetID, packetType packetType, body []byte) 
 }
 
 func readNextPacket(buf *bytes.Buffer) (recoverySetID, packetType, []byte, error) {
+	setID, typ, body, err := readNextPacketBorrowed(buf)
+	if err != nil {
+		return setID, typ, nil, err
+	}
+	return setID, typ, append([]byte(nil), body...), nil
+}
+
+// readNextPacketBorrowed validates a packet and returns a body that aliases
+// buf. Streaming callers must finish consuming it before reusing the buffer.
+func readNextPacketBorrowed(buf *bytes.Buffer) (recoverySetID, packetType, []byte, error) {
 	h, err := readPacketHeader(buf)
 	if err != nil {
 		return [16]byte{}, packetType{}, nil, err
@@ -90,9 +111,7 @@ func readNextPacket(buf *bytes.Buffer) (recoverySetID, packetType, []byte, error
 		return [16]byte{}, packetType{}, nil, errors.New("hash mismatch")
 	}
 
-	bodyCopy := make([]byte, len(body))
-	copy(bodyCopy, body)
-	return h.RecoverySetID, h.Type, bodyCopy, nil
+	return h.RecoverySetID, h.Type, body, nil
 }
 
 func writeNextPacket(buf *bytes.Buffer, setID recoverySetID, packetType packetType, body []byte) error {

@@ -29,11 +29,13 @@ func forEachWindow(sources []windowSource, windowSize, workers int, fn func(i, o
 		n   int
 	}
 	errs := make([]error, len(sources))
+	failed := make([]atomic.Bool, len(sources))
 	var errMu sync.Mutex
 	setErr := func(i int, err error) {
 		errMu.Lock()
 		if errs[i] == nil {
 			errs[i] = err
+			failed[i].Store(true)
 		}
 		errMu.Unlock()
 	}
@@ -46,7 +48,7 @@ func forEachWindow(sources []windowSource, windowSize, workers int, fn func(i, o
 			defer wg.Done()
 			buf := make([]byte, windowSize)
 			for t := range tasks {
-				if errs[t.i] != nil {
+				if failed[t.i].Load() {
 					continue
 				}
 				if _, err := sources[t.i].r.ReadAt(buf[:t.n], t.off); err != nil {
@@ -149,8 +151,10 @@ func (d *Decoder) checkWrittenFiles(paths []string, rows [][]int) []error {
 	}()
 
 	full := make([]windowSource, len(paths))
+	fullCheck := make([]bool, len(paths))
 	for i, src := range sources {
-		if src.r != nil && rows[i] == nil {
+		if src.r != nil && (rows[i] == nil || len(rows[i]) > 0 && len(rows[i])*2 >= len(d.recoverySet[i].checksumPairs)) {
+			fullCheck[i] = true
 			full[i] = src
 		}
 	}
@@ -183,7 +187,7 @@ func (d *Decoder) checkWrittenFiles(paths []string, rows [][]int) []error {
 	for w := 0; w < workers; w++ {
 		go func() {
 			defer wg.Done()
-			buf := make([]byte, d.sliceByteCount)
+			buf := make([]byte, max(d.sliceByteCount, 16*1024))
 			for t := range tasks {
 				err := d.checkSliceAt(sources[t.i], d.recoverySet[t.i], t.idx, buf)
 				if err != nil {
@@ -197,7 +201,7 @@ func (d *Decoder) checkWrittenFiles(paths []string, rows [][]int) []error {
 		}()
 	}
 	for i, src := range sources {
-		if src.r == nil || rows[i] == nil || errs[i] != nil {
+		if src.r == nil || fullCheck[i] || errs[i] != nil {
 			continue
 		}
 		tasks <- task{i, -1}
@@ -239,6 +243,7 @@ func (d *Decoder) checkSliceAt(src windowSource, info decoderInputFileInfo, idx 
 		}
 		return nil
 	}
+	buf = buf[:d.sliceByteCount]
 	clear(buf)
 	start := int64(idx) * int64(d.sliceByteCount)
 	if start > src.size {
