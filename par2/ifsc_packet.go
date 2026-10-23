@@ -5,7 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"errors"
-	"reflect"
+	"io"
 )
 
 var ifscPacketType = packetType{'P', 'A', 'R', ' ', '2', '.', '0', '\x00', 'I', 'F', 'S', 'C'}
@@ -23,19 +23,23 @@ func readIFSCPacket(body []byte) (fileID, ifscPacket, error) {
 	buf := bytes.NewBuffer(body)
 
 	var id fileID
-	err := binary.Read(buf, binary.LittleEndian, &id)
+	_, err := io.ReadFull(buf, id[:])
 	if err != nil {
 		return fileID{}, ifscPacket{}, err
 	}
 
-	checksumPairSize := int(reflect.TypeOf(checksumPair{}).Size())
+	// Both checksums are byte arrays on the wire. Decode their fixed layout
+	// directly instead of reflecting over every byte of every slice checksum.
+	const checksumPairSize = md5.Size + 4
 	if buf.Len() == 0 || buf.Len()%checksumPairSize != 0 {
 		return fileID{}, ifscPacket{}, errors.New("invalid size")
 	}
 	checksumPairs := make([]checksumPair, buf.Len()/checksumPairSize)
-	err = binary.Read(buf, binary.LittleEndian, checksumPairs)
-	if err != nil {
-		return fileID{}, ifscPacket{}, err
+	data := buf.Bytes()
+	for i := range checksumPairs {
+		pair := data[i*checksumPairSize : (i+1)*checksumPairSize]
+		copy(checksumPairs[i].MD5[:], pair[:md5.Size])
+		copy(checksumPairs[i].CRC32[:], pair[md5.Size:])
 	}
 
 	return id, ifscPacket{checksumPairs}, nil

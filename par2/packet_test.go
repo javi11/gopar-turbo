@@ -2,6 +2,7 @@ package par2
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"testing"
 
@@ -24,6 +25,46 @@ func TestPacketHeaderRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, h, roundTripHeader)
 	require.Equal(t, 0, buf.Len())
+}
+
+func TestPacketHeaderTruncationAndOwnedFields(t *testing.T) {
+	wire := make([]byte, 64)
+	for i := range wire {
+		wire[i] = byte(i*37 + 11)
+	}
+	copy(wire, expectedMagic[:])
+	binary.LittleEndian.PutUint64(wire[8:16], 128)
+	for n := 0; n < len(wire); n++ {
+		buf := bytes.NewBuffer(wire[:n])
+		_, err := readPacketHeader(buf)
+		if n == 0 {
+			require.ErrorIs(t, err, io.EOF)
+		} else {
+			require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+		}
+		require.Zero(t, buf.Len())
+	}
+	var want packetHeader
+	require.NoError(t, binary.Read(bytes.NewReader(wire), binary.LittleEndian, &want))
+	encoded := append(wire, 9, 8, 7, 6)
+	buf := bytes.NewBuffer(encoded)
+	got, err := readPacketHeader(buf)
+	require.NoError(t, err)
+	require.Equal(t, []byte{9, 8, 7, 6}, buf.Bytes())
+	clear(encoded[:64])
+	require.Equal(t, want, got)
+}
+
+func BenchmarkReadPacketHeader(b *testing.B) {
+	wire := make([]byte, 64)
+	copy(wire, expectedMagic[:])
+	binary.LittleEndian.PutUint64(wire[8:16], 128)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := readPacketHeader(bytes.NewBuffer(wire)); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 
 type typedPacket struct {

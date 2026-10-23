@@ -296,6 +296,58 @@ type failingParallelWriteIO struct {
 type repairWriteFunc func([]byte, int64) (int, error)
 
 func (f repairWriteFunc) WriteAt(p []byte, off int64) (int, error) { return f(p, off) }
+
+type countingRepairWrites struct {
+	fileIO
+	calls atomic.Int32
+}
+
+func (f *countingRepairWrites) OpenWrite(path string, size int64) (io.WriterAt, func(bool) error, error) {
+	w, closeFn, err := f.fileIO.OpenWrite(path, size)
+	if err != nil {
+		return nil, nil, err
+	}
+	return repairWriteFunc(func(p []byte, off int64) (int, error) {
+		f.calls.Add(1)
+		return w.WriteAt(p, off)
+	}), closeFn, nil
+}
+
+func TestStreamingRepairCoalescesCompleteAdjacentSlices(t *testing.T) {
+	for _, tc := range []struct {
+		name                            string
+		size, sliceSize, budget, writes int
+	}{
+		{"whole-slices", 43, 4, 0, 1},
+		{"partial-chunks", 43, 4, 2, 0},
+		{"batch-limit", (2 << 20) + 43, 256 << 10, 0, 3},
+		{"single-large-slice", (2 << 20) + 43, 2 << 20, 0, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := memfs.RootDir()
+			want := make([]byte, tc.size) // Partial final slice must not extend the file.
+			for i := range want {
+				want[i] = byte(i*19 + 7)
+			}
+			fs := memfs.MakeMemFS(dir, map[string][]byte{"big.rar": want})
+			buildPAR2Data(t, fs, dir, tc.sliceSize, (tc.size+tc.sliceSize-1)/tc.sliceSize)
+			_, err := fs.RemoveFile(filepath.Join(dir, "big.rar"))
+			require.NoError(t, err)
+			f := &countingRepairWrites{fileIO: testFileIO{t, fs}}
+			_, err = repair(f, filepath.Join(dir, "file.par2"), RepairOptions{MemoryBudget: tc.budget})
+			require.NoError(t, err)
+			got, err := fs.ReadFile(filepath.Join(dir, "big.rar"))
+			require.NoError(t, err)
+			require.Equal(t, want, got)
+			if tc.writes > 0 {
+				require.EqualValues(t, tc.writes, f.calls.Load(), "complete adjacent slices should share bounded writes")
+			} else {
+				require.Greater(t, f.calls.Load(), int32(1), "partial ranges must not bridge unwritten gaps")
+			}
+		})
+	}
+}
+
 func (f *failingParallelWriteIO) OpenWrite(path string, size int64) (io.WriterAt, func(bool) error, error) {
 	w, closeFn, err := f.fileIO.OpenWrite(path, size)
 	if err != nil {

@@ -396,3 +396,61 @@ that all writes finish before abort and that failed repairs do not commit.
 Reproduce with [deep.py](deep.py) and [the fixture instructions](README.md).
 Final binary/fixture hashes, arguments and all 48 samples are in
 [deep-results-2026-10-23.json](deep-results-2026-10-23.json).
+
+
+## 2026-10-24: direct metadata decoding and batched output writes
+
+These results supersede the remaining small-fixture gap above. Fixed-layout
+packet-header and IFSC decoding removes repeated reflection work. Reconstructed
+rows share a contiguous output bank, allowing complete adjacent slices in one
+file to share bounded writes without an additional copy. Header/hash validation,
+owned checksum fields, partial-chunk writes and final-file trimming are preserved.
+
+Same Apple M4, Go 1.27.0, native backend, 10 workers and warm APFS methodology
+as above. Three repetitions alternate tool order, comparing the candidate with
+commit `b38267b` and parfast 1.7.1. Each tool uses its default memory budget.
+All **72 repairs passed SHA-256 validation**. Values below are medians; CPU-s
+is process user plus system CPU time across all threads, not peak CPU utilization.
+
+| Block size | Missing | Previous time | New time | parfast time | Previous CPU-s | New CPU-s |
+|---|---:|---:|---:|---:|---:|---:|
+| 16KiB | 1,024 | 0.474 s | 0.360 s | 0.364 s | 2.630 | 2.557 |
+| 16KiB | 2,048 | 0.574 s | 0.474 s | 0.474 s | 3.533 | 3.330 |
+| 16KiB | 4,096 | 0.771 s | 0.663 s | 0.738 s | 5.043 | 4.884 |
+| 16KiB | 8,192 | 1.310 s | 1.119 s | 1.177 s | 7.703 | 7.461 |
+| 128KiB | 1,024 | 2.208 s | 2.278 s | 3.121 s | 16.373 | 16.327 |
+| 128KiB | 2,048 | 2.782 s | 2.753 s | 3.477 s | 20.678 | 20.722 |
+| 128KiB | 4,096 | 3.681 s | 3.742 s | 4.634 s | 28.850 | 28.200 |
+| 128KiB | 8,192 | 6.550 s | 6.667 s | 7.094 s | 45.387 | 44.667 |
+
+The candidate matches or beats parfast's median wall time at every measured
+depth: approximately tied to 10% faster for 16 KiB blocks and 6–27% faster
+for 128 KiB blocks. This meets the benchmark parity target on these fixtures;
+the near-ties are not evidence of a statistically significant advantage.
+
+Against our previous binary, the small fixture is 14–24% faster and uses
+2.8–5.7% fewer CPU-seconds. Large-fixture wall time varies from 1.1% faster
+to 3.2% slower; CPU time varies from 2.3% lower to 0.2% higher. Those small
+changes do not establish a consistent CPU saving without slowdown on large
+repairs. The worker default remains unchanged. Lower worker counts can save
+more CPU with workload-dependent slowdowns; see [CPU_RESULTS.md](CPU_RESULTS.md).
+Faster completion also does not imply a lower instantaneous CPU percentage.
+
+Median candidate peak RSS ranges from 245.6–403.1 MiB on the small fixture
+and 531.1–555.7 MiB on the large fixture, versus parfast's 375.2–881.5 MiB
+and 1368.5–2225.6 MiB respectively. Bulk budgets are not RSS caps.
+
+The reported hour-long repair was not reproduced. Cold HDDs, network storage,
+concurrent jobs, other CPUs and irregular exponent performance remain outside
+this comparison. Irregular exponents retain the tested matrix fallback.
+
+Raw per-run wall/CPU/RSS values, exact arguments and binary/fixture hashes are
+in [deep-results-2026-10-24.json](deep-results-2026-10-24.json). Reproduce with
+`deep.py --baseline-gopar <previous-binary>` and the existing fixture commands.
+
+Validation for this final change: full native and pure-Go test suites, repair
+race tests and vet for both backends pass. Tests cover metadata truncation and
+ownership, partial output chunks, final-file clipping, the 1 MiB batch limit
+and individual slices larger than that limit. Independent read-only review
+found no correctness blocker. A fresh build has the same SHA-256 as the timed
+candidate binary.

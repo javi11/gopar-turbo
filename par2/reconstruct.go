@@ -204,8 +204,9 @@ func (d *Decoder) classifyReconstruction() ([]int, []int, []int, []foldInput, er
 // handing each rebuilt range to sink instead of accumulating it, so nothing
 // reconstructed is ever resident beyond one chunk pass. preserved supplies
 // surviving shards that were read before their source file was overwritten.
-// sink is called once per chunk range and must consume its rows before returning.
-func (d *Decoder) reconstructTo(cache *readerCache, preserved map[int][]byte, sink func(globalRows []int, off int, data [][]byte) error) ([]int, error) {
+// sink receives a contiguous bank with rangeSize bytes per row and must consume
+// it before returning. This lets adjacent complete slices share a disk write.
+func (d *Decoder) reconstructTo(cache *readerCache, preserved map[int][]byte, sink func(globalRows []int, off, rangeSize int, data []byte) error) ([]int, error) {
 	availableRows, missingRows, parityExponents, inputs, err := d.classifyReconstruction()
 	if err != nil {
 		return nil, err
@@ -229,17 +230,23 @@ func (d *Decoder) reconstructTo(cache *readerCache, preserved map[int][]byte, si
 		return nil, err
 	}
 	out := make([][]byte, len(missingRows))
+	var outputBank []byte
 
 	for off := 0; off < d.sliceByteCount; off += chunk {
 		n := chunk
 		if off+n > d.sliceByteCount {
 			n = d.sliceByteCount - off
 		}
+		if n > int(^uint(0)>>1)/len(out) {
+			return nil, errors.New("reconstruction output size overflow")
+		}
+		bankSize := n * len(out)
+		if cap(outputBank) < bankSize {
+			outputBank = make([]byte, bankSize)
+		}
+		outputBank = outputBank[:bankSize]
 		for i := range out {
-			if cap(out[i]) < n {
-				out[i] = make([]byte, n)
-			}
-			out[i] = out[i][:n]
+			out[i] = outputBank[i*n : (i+1)*n : (i+1)*n]
 		}
 
 		// Matrix plans may load inputs concurrently; the closure uses only
@@ -275,7 +282,7 @@ func (d *Decoder) reconstructTo(cache *readerCache, preserved map[int][]byte, si
 			return nil, err
 		}
 
-		if err := sink(missingRows, off, out); err != nil {
+		if err := sink(missingRows, off, n, outputBank); err != nil {
 			return nil, err
 		}
 	}

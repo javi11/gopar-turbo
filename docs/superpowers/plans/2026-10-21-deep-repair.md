@@ -30,12 +30,12 @@ Spec: ../specs/2026-10-21-deep-repair-design.md.
   initialization, native repair and the pure-Go fallback.
 - [x] Finish repeated comparisons for 16 KiB and 128 KiB block fixtures.
 - [x] Record final medians, memory usage and remaining performance limits.
-- [ ] Close the remaining 2–24% wall-time gap on the 16 KiB fixture.
+- [x] Close the remaining 2–24% wall-time gap on the 16 KiB fixture.
 
 Historical full-field results remain in bench/RESULTS.md; they are superseded
 by the transposed-moment implementation. The 2026-10-23 comparison validates
 48 repairs and shows gopar ahead on all four 128 KiB cases, but behind on the
-16 KiB cases. Matching parfast across the complete ladder remains unfinished.
+16 KiB cases. At that point, matching parfast across the complete ladder remained unfinished.
 
 Latest remaining-gap investigation: a CPU profile of the 16 KiB/2,048-missing
 case attributes most sampled arithmetic CPU to native transform calls. A
@@ -44,3 +44,14 @@ case attributes most sampled arithmetic CPU to native transform calls. A
 12 experimental repairs passed SHA-256. The prototype was reverted. Further
 work should profile native transform execution and memory traffic; Go's
 cgocall attribution alone does not distinguish kernel work from call overhead.
+
+
+2026-10-24 completion: profiling metadata loading identified repeated reflective
+IFSC decoding. Direct owned-field parsing and batched complete-slice output
+writes close the small-fixture gap. All 72 paired candidate/baseline/parfast
+repairs pass SHA-256; candidate medians match or beat parfast across both
+fixtures and all four depths. See bench/RESULTS.md and its raw artifact.
+The additional CPU-efficiency requirement is only partly achieved: small-case
+CPU work falls 2.8–5.7% with faster repairs, while large-case changes are mixed.
+No portable promise of lower CPU utilization or hour-long-repair prevention
+is justified by these warm-cache measurements.

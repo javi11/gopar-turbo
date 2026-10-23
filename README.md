@@ -90,6 +90,21 @@ this option is not a process RSS cap, and tiny budgets still need minimum-sized,
 aligned buffers. The optional `DoubleCheck` reads each data byte once across
 its chunk passes and computes only the recovery blocks actually present.
 
+`RepairOptions.NumGoroutines` lets callers tune repair concurrency to reduce CPU
+consumption. For example, a workload-tested limit can be set explicitly:
+
+```go
+par2.Repair("recovery.par2", par2.RepairOptions{
+    NumGoroutines: 8,
+})
+```
+
+This is a worker setting, not a hard CPU-percentage limit. On the tested 10-core
+Apple M4, a worker sweep against commit `b38267b` found that eight workers used 8–16% fewer CPU-seconds than ten, but one large case
+took 6% longer. The default remains unchanged. See [CPU measurements](bench/CPU_RESULTS.md)
+and the [worker comparison commands](bench/README.md#repair-cpu-consumption) to
+choose a setting for your workload; CPU savings without slowdown are not universal.
+
 ## The gf16 package (streaming consumers)
 
 `github.com/javi11/gopar-turbo/gf16` exposes the SIMD backend directly for

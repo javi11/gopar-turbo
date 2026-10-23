@@ -86,3 +86,18 @@ sync.Once. This avoids touching the entire 64 MiB table at process startup
 when native arithmetic handles the bulk work. Concurrent callers see only
 complete entries; scalar field tables and the amd64 SSSE3 table retain their
 existing initialization. Native and pure-Go suites exercise both paths.
+
+
+## Metadata decoding and output batching
+
+Read fixed-width packet headers and IFSC checksum arrays directly from their
+wire layout. Preserve truncation errors, header validation, packet hashes and
+owned decoded fields; this removes reflection during repeated metadata scans.
+
+Reconstruction outputs share one contiguous bank, with a capacity-limited view
+for each row and checked total allocation size. The bank has the same bulk
+byte count as separate output rows. Complete adjacent slices in the same file
+and adjacent bank positions share writes of up to 1 MiB (a single larger slice
+is still allowed). Partial chunks remain separate because their file offsets
+have gaps. Writes trim the final slice to the real file length and record every
+repaired row for verification. All workers finish before bank reuse or cleanup.

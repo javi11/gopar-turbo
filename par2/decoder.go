@@ -1363,7 +1363,7 @@ func (d *Decoder) Repair(checkParity bool) ([]string, error) {
 	// Write distinct files concurrently, keeping each file's ranges ordered.
 	// The callback waits before reconstruction reuses any output buffers.
 	var outputGroups [][]int
-	_, err := d.reconstructTo(cache, preserved, func(rows []int, off int, data [][]byte) error {
+	_, err := d.reconstructTo(cache, preserved, func(rows []int, off, rangeSize int, data []byte) error {
 		if outputGroups == nil {
 			outputGroups = make([][]int, len(writers))
 			for j, row := range rows {
@@ -1382,16 +1382,32 @@ func (d *Decoder) Repair(checkParity bool) ([]string, error) {
 			go func() {
 				defer wg.Done()
 				for i := range jobs {
-					for _, j := range outputGroups[i] {
+					group := outputGroups[i]
+					for pos := 0; pos < len(group); {
+						j := group[pos]
 						row := rows[j]
+						end := pos + 1
+						// Partial chunks have gaps between slices. Only complete,
+						// consecutive slices in this file and bank may share a write.
+						if off == 0 && rangeSize == d.sliceByteCount {
+							limit := max(1, (1<<20)/rangeSize)
+							for end < len(group) && end-pos < limit &&
+								group[end] == j+end-pos && rows[group[end]] == row+end-pos {
+								end++
+							}
+						}
 						fileOff := (row-shardBase[i])*d.sliceByteCount + off
 						if off == 0 && writers[i].cloned {
-							writers[i].written = append(writers[i].written, row-shardBase[i])
+							for q := pos; q < end; q++ {
+								writers[i].written = append(writers[i].written, rows[group[q]]-shardBase[i])
+							}
 						}
-						if err := writeShardRange(writers[i].w, fileOff, data[j], d.recoverySet[i].byteCount); err != nil {
+						batch := data[j*rangeSize : (j+end-pos)*rangeSize]
+						if err := writeShardRange(writers[i].w, fileOff, batch, d.recoverySet[i].byteCount); err != nil {
 							writeErrors[i] = err
 							break
 						}
+						pos = end
 					}
 				}
 			}()
