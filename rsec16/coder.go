@@ -1,6 +1,7 @@
 package rsec16
 
 import (
+	"encoding/binary"
 	"errors"
 	"math"
 	"runtime"
@@ -139,6 +140,28 @@ func NewCoderPAR2Vandermonde(dataShards, parityShards, numGoroutines int) (Coder
 	return Coder{dataShards, parityShards, numGoroutines, parityMatrix}, nil
 }
 
+// NewCoderPAR2VandermondeRows constructs only the specified recovery exponents.
+// Parity slice indices and usedParityRows refer to positions in parityRows,
+// rather than the exponents themselves. This avoids allocating absent rows
+// when a PAR2 set contains only a few recovery blocks with high exponents.
+func NewCoderPAR2VandermondeRows(dataShards int, parityRows []int, numGoroutines int) (Coder, error) {
+	if dataShards <= 0 || len(parityRows) == 0 || numGoroutines <= 0 {
+		panic("invalid coder dimensions or goroutine count")
+	}
+	if dataShards > len(generators) {
+		return Coder{}, errors.New("too many data shards")
+	}
+	for _, row := range parityRows {
+		if row < 0 || row > math.MaxUint16 {
+			return Coder{}, errors.New("parity exponent out of range")
+		}
+	}
+	matrix := gf2p16.NewMatrixFromFunction(len(parityRows), dataShards, func(i, j int) gf2p16.T {
+		return generators[j].Pow(uint32(parityRows[i]))
+	})
+	return Coder{dataShards, len(parityRows), numGoroutines, matrix}, nil
+}
+
 func (c Coder) applyMatrix(m gf2p16.Matrix, in, out [][]byte) {
 	if gf16.Accelerated() {
 		applyMatrixGF16(m, in, out, c.numGoroutines)
@@ -192,7 +215,37 @@ func (c Coder) ParityMatrix() gf2p16.Matrix {
 // reconstruct by streaming need the matrix without the all-in-memory
 // application that ReconstructData performs.
 func (c Coder) ReconstructionMatrix(availableRows, missingRows, usedParityRows []int) (gf2p16.Matrix, error) {
-	return makeReconstructionMatrix(c.dataShards, availableRows, missingRows, usedParityRows, c.parityMatrix)
+	// Small systems are cheaper to solve directly. For heavy damage, avoid
+	// applying each elimination step to the wide data matrix in scalar Go:
+	// invert the small missing-block system, then stream its product through
+	// the same SIMD/parallel backend used for shard reconstruction.
+	if len(missingRows) < 32 || c.dataShards < 4*len(missingRows) {
+		return makeReconstructionMatrix(c.dataShards, availableRows, missingRows, usedParityRows, c.parityMatrix)
+	}
+	square := gf2p16.NewMatrixFromFunction(len(usedParityRows), len(missingRows), func(i, j int) gf2p16.T {
+		return c.parityMatrix.At(usedParityRows[i], missingRows[j])
+	})
+	inverse, err := square.Inverse()
+	if err != nil {
+		return gf2p16.Matrix{}, err
+	}
+	out := make([][]byte, len(missingRows))
+	for i := range out {
+		out[i] = make([]byte, 2*c.dataShards)
+	}
+	err = FoldInputs(inverse, len(usedParityRows), 2*c.dataShards, func(i int, buf []byte) error {
+		for j, row := range availableRows {
+			binary.LittleEndian.PutUint16(buf[2*j:], uint16(c.parityMatrix.At(usedParityRows[i], row)))
+		}
+		binary.LittleEndian.PutUint16(buf[2*(len(availableRows)+i):], 1)
+		return nil
+	}, out, c.numGoroutines)
+	if err != nil {
+		return gf2p16.Matrix{}, err
+	}
+	return gf2p16.NewMatrixFromFunction(len(missingRows), c.dataShards, func(i, j int) gf2p16.T {
+		return gf2p16.T(binary.LittleEndian.Uint16(out[i][2*j:]))
+	}), nil
 }
 
 // NotEnoughParityShardsError is returned by ReconstructData or if
@@ -238,7 +291,7 @@ func (c Coder) ReconstructData(data, parity [][]byte) error {
 		return NotEnoughParityShardsError{}
 	}
 
-	reconstructionMatrix, err := makeReconstructionMatrix(c.dataShards, availableRows, missingRows, usedParityRows, c.parityMatrix)
+	reconstructionMatrix, err := c.ReconstructionMatrix(availableRows, missingRows, usedParityRows)
 	if err != nil {
 		return err
 	}

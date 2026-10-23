@@ -137,39 +137,27 @@ type reconstructionPlan struct {
 	inputs      []foldInput
 }
 
-// foldAccumulatorCap bounds the default accumulator footprint during
-// reconstruction. Chunked passes at this size are measured to cost no
-// wall-clock (two passes on the benchmark set ran as fast as one), so a
-// larger MemoryBudget buys nothing and the cap applies regardless.
-const foldAccumulatorCap = 256 << 20
+// defaultFoldMemoryBudget is the default bulk folding buffer budget. Explicit
+// budgets may be larger to reduce strided disk I/O on large repairs.
+const defaultFoldMemoryBudget = 512 << 20
 
-// chunkSizeFor returns the byte range of each slice to reconstruct per pass so
-// that one accumulator per missing shard fits inside budget. The result is
-// always even, which is all gf16 requires, and never exceeds a whole slice.
+// chunkSizeFor budgets caller outputs, prepared accumulators, two banks of
+// up to 16 prepared inputs, up to 16 raw inputs and a zero buffer. Small
+// buffers incur backend alignment overhead; matrices, metadata, scan buffers
+// and native contexts are separate. A two-byte minimum permits tiny budgets.
 func chunkSizeFor(budget, sliceByteCount, missing int) int {
 	if missing <= 0 {
 		return sliceByteCount
 	}
 	if budget <= 0 {
-		budget = defaultMemoryBudget()
+		budget = min(defaultMemoryBudget(), defaultFoldMemoryBudget)
 	}
-	if budget > foldAccumulatorCap {
-		budget = foldAccumulatorCap
-	}
-	per := budget / missing
-	if per >= sliceByteCount {
-		return sliceByteCount
-	}
-	per -= per % 2
-	if per < 2 {
-		per = 2
-	}
-	return per
+	return rsec16.FoldChunkSize(budget, sliceByteCount, missing)
 }
 
-// planReconstruction classifies every shard as available or missing and picks
+// classifyReconstruction classifies every shard as available or missing and picks
 // the recovery blocks that will stand in for the missing ones.
-func (d *Decoder) planReconstruction() (rsec16.Coder, []int, []int, []int, []foldInput, error) {
+func (d *Decoder) classifyReconstruction() ([]int, []int, []int, []foldInput, error) {
 	var availableRows, missingRows []int
 	var inputs []foldInput
 
@@ -178,10 +166,10 @@ func (d *Decoder) planReconstruction() (rsec16.Coder, []int, []int, []int, []fol
 		totalShards += len(info.shardInfos)
 	}
 	if totalShards == 0 {
-		return rsec16.Coder{}, nil, nil, nil, nil, errors.New("no file integrity info")
+		return nil, nil, nil, nil, errors.New("no file integrity info")
 	}
 	if len(d.parityPresent) == 0 {
-		return rsec16.Coder{}, nil, nil, nil, nil, errors.New("no parity shards")
+		return nil, nil, nil, nil, errors.New("no parity shards")
 	}
 
 	idx := 0
@@ -197,32 +185,28 @@ func (d *Decoder) planReconstruction() (rsec16.Coder, []int, []int, []int, []fol
 		}
 	}
 
-	var usedParityRows []int
+	var parityExponents []int
 	for i := 0; i < len(d.parityPresent) && len(inputs) < totalShards; i++ {
 		if !d.parityPresent[i] {
 			continue
 		}
-		usedParityRows = append(usedParityRows, i)
+		parityExponents = append(parityExponents, i)
 		inputs = append(inputs, foldInput{isParity: true, parityIdx: i})
 	}
 	if len(missingRows) > 0 && len(inputs) < totalShards {
-		return rsec16.Coder{}, nil, nil, nil, nil, rsec16.NotEnoughParityShardsError{}
+		return nil, nil, nil, nil, rsec16.NotEnoughParityShardsError{}
 	}
 
-	coder, err := rsec16.NewCoderPAR2Vandermonde(totalShards, len(d.parityPresent), d.numGoroutines)
-	if err != nil {
-		return rsec16.Coder{}, nil, nil, nil, nil, err
-	}
-	return coder, availableRows, missingRows, usedParityRows, inputs, nil
+	return availableRows, missingRows, parityExponents, inputs, nil
 }
 
 // reconstructTo rebuilds the missing shards chunk range by chunk range,
 // handing each rebuilt range to sink instead of accumulating it, so nothing
 // reconstructed is ever resident beyond one chunk pass. preserved supplies
 // surviving shards that were read before their source file was overwritten.
-// sink is called once per (missing shard, chunk range), from one goroutine.
-func (d *Decoder) reconstructTo(cache *readerCache, preserved map[int][]byte, sink func(globalRow, off int, data []byte) error) ([]int, error) {
-	coder, availableRows, missingRows, usedParityRows, inputs, err := d.planReconstruction()
+// sink is called once per chunk range and must consume its rows before returning.
+func (d *Decoder) reconstructTo(cache *readerCache, preserved map[int][]byte, sink func(globalRows []int, off int, data [][]byte) error) ([]int, error) {
+	availableRows, missingRows, parityExponents, inputs, err := d.classifyReconstruction()
 	if err != nil {
 		return nil, err
 	}
@@ -230,15 +214,20 @@ func (d *Decoder) reconstructTo(cache *readerCache, preserved map[int][]byte, si
 		return nil, nil
 	}
 
-	m, err := coder.ReconstructionMatrix(availableRows, missingRows, usedParityRows)
+	budget := d.memoryBudget
+	if budget <= 0 {
+		budget = min(defaultMemoryBudget(), defaultFoldMemoryBudget)
+	}
+	plan, err := rsec16.NewPAR2ReconstructionPlan(len(inputs), availableRows, missingRows, parityExponents, d.numGoroutines, budget)
 	if err != nil {
 		return nil, err
 	}
-
-	// Data inputs come first and in availableRows order, so input j maps to
-	// global row availableRows[j]; preserved shards stand in for sources
-	// whose files are being rewritten.
-	chunk := chunkSizeFor(d.memoryBudget, d.sliceByteCount, len(missingRows))
+	defer plan.Close()
+	// Data inputs precede recovery inputs; preserved uses global data rows.
+	chunk, err := plan.ChunkSize(d.sliceByteCount)
+	if err != nil {
+		return nil, err
+	}
 	out := make([][]byte, len(missingRows))
 
 	for off := 0; off < d.sliceByteCount; off += chunk {
@@ -253,10 +242,9 @@ func (d *Decoder) reconstructTo(cache *readerCache, preserved map[int][]byte, si
 			out[i] = out[i][:n]
 		}
 
-		// Inputs are re-read from disk, so they are loaded concurrently:
-		// the closure touches only read-only plan state and the
-		// concurrency-safe cache.
-		err := rsec16.FoldInputsParallel(m, len(inputs), n, func(j int, buf []byte) error {
+		// Matrix plans may load inputs concurrently; the closure uses only
+		// read-only plan state and the concurrency-safe cache.
+		err := plan.Fold(n, func(j int, buf []byte) error {
 			in := inputs[j]
 			if in.isParity {
 				loc := d.parityLocations[in.parityIdx]
@@ -282,15 +270,13 @@ func (d *Decoder) reconstructTo(cache *readerCache, preserved map[int][]byte, si
 				return nil
 			}
 			return cache.readRange(in.shard, off, buf)
-		}, out, d.numGoroutines)
+		}, out)
 		if err != nil {
 			return nil, err
 		}
 
-		for i, row := range missingRows {
-			if err := sink(row, off, out[i]); err != nil {
-				return nil, err
-			}
+		if err := sink(missingRows, off, out); err != nil {
+			return nil, err
 		}
 	}
 

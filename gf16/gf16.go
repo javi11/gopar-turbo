@@ -41,3 +41,19 @@ func checkSliceSize(sliceSize int) error {
 	}
 	return nil
 }
+
+func bufferBank(size, align, count int) [][]byte {
+	if count <= 0 {
+		panic("gf16: invalid buffer count")
+	}
+	stride := (size + align - 1) / align * align
+	if stride > int(^uint(0)>>1)/count {
+		panic("gf16: buffer bank too large")
+	}
+	bank := alignedSlice(stride*count, align)
+	rows := make([][]byte, count)
+	for i := range rows {
+		rows[i] = bank[i*stride : i*stride+size : i*stride+size]
+	}
+	return rows
+}

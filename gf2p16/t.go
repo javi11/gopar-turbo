@@ -1,6 +1,9 @@
 package gf2p16
 
-import "github.com/javi11/gopar-turbo/gf2"
+import (
+	"github.com/javi11/gopar-turbo/gf2"
+	"sync"
+)
 
 // T is an element of GF(2^16).
 type T uint16
@@ -27,6 +30,20 @@ type mulTableEntry struct {
 }
 
 var mulTable [1 << 16]mulTableEntry
+var mulTableOnce [1 << 16]sync.Once
+
+// Region tables are needed only by the Go arithmetic fallback. Initialize
+// each coefficient on first use rather than touching 64 MiB at startup.
+func multiplicationTable(c T) *mulTableEntry {
+	mulTableOnce[c].Do(func() {
+		entry := &mulTable[c]
+		for j := range entry.s0 {
+			entry.s0[j] = c.Times(T(j))
+			entry.s8[j] = c.Times(T(j << 8))
+		}
+	})
+	return &mulTable[c]
+}
 
 func init() {
 	// TODO: Generate tables at compile time.
@@ -53,15 +70,6 @@ func init() {
 		expTable[p] = x
 		_, r := gf2.Poly64(x).Times(gf2.Poly64(g)).Div(m)
 		x = T(r)
-	}
-
-	// Since we've filled in logTable and expTable, we can use
-	// T.Times below.
-	for i := 0; i < len(mulTable); i++ {
-		for j := 0; j < len(mulTable[i].s0); j++ {
-			mulTable[i].s0[j] = T(i).Times(T(j))
-			mulTable[i].s8[j] = T(i).Times(T(j << 8))
-		}
 	}
 
 	platformInit()

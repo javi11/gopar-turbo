@@ -277,7 +277,7 @@ type Decoder struct {
 
 	numGoroutines int
 	scanPolicy    scanPolicy
-	// memoryBudget caps the bytes held for reconstruction accumulators.
+	// memoryBudget selects the approximate bulk reconstruction buffer budget.
 	// Zero selects defaultMemoryBudget().
 	memoryBudget int
 
@@ -987,7 +987,7 @@ func (d *Decoder) loadParityData(retain bool) error {
 			n := dataLen
 			record(vi, pi, func() { delegate.OnRecoveryPacketLoad(uint16(exp), n) })
 			if int(exp) >= len(parityPresent) {
-				grow := int(exp+1) - len(parityPresent)
+				grow := int(exp) + 1 - len(parityPresent)
 				parityPresent = append(parityPresent, make([]bool, grow)...)
 				parityLocations = append(parityLocations, make([]parityLocation, grow)...)
 			}
@@ -1031,7 +1031,7 @@ func (d *Decoder) loadParityData(retain bool) error {
 		return nil
 	}
 
-	type task struct{ vi, pi int }
+	type task struct{ vi, pi, end int }
 	tasks := make(chan task)
 	var wg sync.WaitGroup
 	workers := max(d.numGoroutines, 1)
@@ -1042,34 +1042,59 @@ func (d *Decoder) loadParityData(retain bool) error {
 			var buf []byte
 			for t := range tasks {
 				v := vols[t.vi]
-				ref := v.refs[t.pi]
-				var (
-					setID   recoverySetID
-					typ     packetType
-					body    []byte
-					dataLen int
-					err     error
-				)
-				if !retain && packetType(ref.header.Type) == recoveryPacketType && ref.header.RecoverySetID == d.setID {
-					// Presence only: the exponent is enough, the body
-					// stays on disk unread (see LoadParityPresence).
-					setID, typ = ref.header.RecoverySetID, recoveryPacketType
-					body, dataLen, err = readRecoveryExponent(v.r, ref)
-				} else {
-					setID, typ, body, err = readPacketAt(v.r, ref, &buf)
-					if typ == recoveryPacketType {
-						dataLen = len(body) - 4
+				first := v.refs[t.pi]
+				if retain {
+					last := v.refs[t.end-1]
+					length := last.offset + last.length - first.offset
+					if int64(cap(buf)) < length {
+						buf = make([]byte, length)
+					}
+					buf = buf[:length]
+					if _, err := v.r.ReadAt(buf, first.offset); err != nil {
+						mu.Lock()
+						if v.err == nil {
+							v.err = err
+						}
+						mu.Unlock()
+						continue
 					}
 				}
-				mu.Lock()
-				if v.err == nil {
-					if err != nil {
-						v.err = err
+				for pi := t.pi; pi < t.end; pi++ {
+					ref := v.refs[pi]
+					var (
+						setID   recoverySetID
+						typ     packetType
+						body    []byte
+						dataLen int
+						err     error
+					)
+					if !retain && packetType(ref.header.Type) == recoveryPacketType && ref.header.RecoverySetID == d.setID {
+						// Presence only: the exponent is enough, the body
+						// stays on disk unread (see LoadParityPresence).
+						setID, typ = ref.header.RecoverySetID, recoveryPacketType
+						body, dataLen, err = readRecoveryExponent(v.r, ref)
+					} else if retain {
+						start := ref.offset - first.offset
+						setID, typ, body, err = readNextPacketBorrowed(bytes.NewBuffer(buf[start : start+ref.length]))
+						if typ == recoveryPacketType {
+							dataLen = len(body) - 4
+						}
 					} else {
-						v.err = handle(t.vi, t.pi, v, setID, typ, body, ref.offset, dataLen)
+						setID, typ, body, err = readPacketAt(v.r, ref, &buf)
+						if typ == recoveryPacketType {
+							dataLen = len(body) - 4
+						}
 					}
+					mu.Lock()
+					if v.err == nil {
+						if err != nil {
+							v.err = err
+						} else {
+							v.err = handle(t.vi, pi, v, setID, typ, body, ref.offset, dataLen)
+						}
+					}
+					mu.Unlock()
 				}
-				mu.Unlock()
 			}
 		}()
 	}
@@ -1077,8 +1102,15 @@ func (d *Decoder) loadParityData(retain bool) error {
 		if v.err != nil {
 			continue
 		}
-		for pi := range v.refs {
-			tasks <- task{vi, pi}
+		for pi := 0; pi < len(v.refs); {
+			end := pi + 1
+			// Keep each read bounded while amortizing disk calls and worker
+			// handoffs. An individual larger packet retains its own limit.
+			for end < len(v.refs) && v.refs[end].offset+v.refs[end].length-v.refs[pi].offset <= 1<<20 {
+				end++
+			}
+			tasks <- task{vi, pi, end}
+			pi = end
 		}
 	}
 	close(tasks)
@@ -1328,17 +1360,55 @@ func (d *Decoder) Repair(checkParity bool) ([]string, error) {
 		}
 	}
 
-	// Stream reconstruction straight into the open files.
-	_, err := d.reconstructTo(cache, preserved, func(row, off int, data []byte) error {
-		i, ok := rowToFile[row]
-		if !ok {
-			return errors.New("reconstructed a shard no file was waiting for")
+	// Write distinct files concurrently, keeping each file's ranges ordered.
+	// The callback waits before reconstruction reuses any output buffers.
+	var outputGroups [][]int
+	_, err := d.reconstructTo(cache, preserved, func(rows []int, off int, data [][]byte) error {
+		if outputGroups == nil {
+			outputGroups = make([][]int, len(writers))
+			for j, row := range rows {
+				i, ok := rowToFile[row]
+				if !ok {
+					return errors.New("reconstructed a shard no file was waiting for")
+				}
+				outputGroups[i] = append(outputGroups[i], j)
+			}
 		}
-		fileOff := (row-shardBase[i])*d.sliceByteCount + off
-		if off == 0 && writers[i].cloned {
-			writers[i].written = append(writers[i].written, row-shardBase[i])
+		jobs := make(chan int)
+		writeErrors := make([]error, len(writers))
+		var wg sync.WaitGroup
+		for worker := 0; worker < min(max(d.numGoroutines, 1), len(writers)); worker++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range jobs {
+					for _, j := range outputGroups[i] {
+						row := rows[j]
+						fileOff := (row-shardBase[i])*d.sliceByteCount + off
+						if off == 0 && writers[i].cloned {
+							writers[i].written = append(writers[i].written, row-shardBase[i])
+						}
+						if err := writeShardRange(writers[i].w, fileOff, data[j], d.recoverySet[i].byteCount); err != nil {
+							writeErrors[i] = err
+							break
+						}
+					}
+				}
+			}()
 		}
-		return writeShardRange(writers[i].w, fileOff, data, d.recoverySet[i].byteCount)
+		for i, group := range outputGroups {
+			if len(group) > 0 {
+				jobs <- i
+			}
+		}
+		close(jobs)
+		wg.Wait()
+		for _, err := range writeErrors {
+			if err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		closeAll()
@@ -1612,17 +1682,24 @@ func (d *Decoder) preserveShardsBeforeOverwrite(cache *readerCache, preserved ma
 // bounded way reconstruction does, so the double check does not undo the
 // memory saving it is checking.
 func (d *Decoder) verifyParity(cache *readerCache) error {
-	coder, _, _, _, _, err := d.planReconstruction()
-	if err != nil {
-		return err
-	}
-
 	var dataShards []shardIntegrityInfo
 	for _, info := range d.fileIntegrityInfos {
 		dataShards = append(dataShards, info.shardInfos...)
 	}
-
-	parityCount := len(d.parityPresent)
+	var parityRows []int
+	for i, present := range d.parityPresent {
+		if present {
+			parityRows = append(parityRows, i)
+		}
+	}
+	if len(parityRows) == 0 {
+		return nil
+	}
+	coder, err := rsec16.NewCoderPAR2VandermondeRows(len(dataShards), parityRows, d.numGoroutines)
+	if err != nil {
+		return err
+	}
+	parityCount := len(parityRows)
 	chunk := chunkSizeFor(d.memoryBudget, d.sliceByteCount, parityCount)
 	out := make([][]byte, parityCount)
 
@@ -1638,22 +1715,9 @@ func (d *Decoder) verifyParity(cache *readerCache) error {
 			out[i] = out[i][:n]
 		}
 
-		// Inputs load concurrently, so each call reads into its own
-		// pooled slice buffer rather than one shared scratch.
-		bufs := sync.Pool{New: func() any { b := make([]byte, d.sliceByteCount); return &b }}
+		// Each pass reads only its byte range, including zero-padding at EOF.
 		err := rsec16.FoldInputsParallel(coder.ParityMatrix(), len(dataShards), n, func(j int, dst []byte) error {
-			bp := bufs.Get().(*[]byte)
-			defer bufs.Put(bp)
-			buf := *bp
-			if err := cache.readRange(dataShards[j], 0, buf); err != nil {
-				return err
-			}
-			end := off + n
-			if end > len(buf) {
-				end = len(buf)
-			}
-			copy(dst, buf[off:end])
-			return nil
+			return cache.readRange(dataShards[j], off, dst)
 		}, out, d.numGoroutines)
 		if err != nil {
 			return err
@@ -1662,7 +1726,8 @@ func (d *Decoder) verifyParity(cache *readerCache) error {
 		// Compare against the stored recovery blocks, read back from
 		// their volumes a chunk at a time.
 		stored := make([]byte, n)
-		for i, loc := range d.parityLocations {
+		for i, row := range parityRows {
+			loc := d.parityLocations[row]
 			if loc.path == "" || off >= loc.length {
 				continue
 			}

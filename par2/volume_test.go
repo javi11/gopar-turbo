@@ -166,3 +166,31 @@ func TestLoadParityRecordsLocationsNotBytes(t *testing.T) {
 		require.Equal(t, want, got, "location %d must point at the block data", i)
 	}
 }
+
+// Batches may cross repeated metadata and recovery packets. A damaged packet
+// in a later batch must still fail validation rather than being trusted from
+// the header index.
+func TestLoadParityBatchesValidateEveryPacket(t *testing.T) {
+	dir := memfs.RootDir()
+	fs := makeShiftTestMemFS(dir)
+	buildPAR2Data(t, fs, dir, 4, 2)
+	volume := filepath.Join(dir, "file.vol00+01.par2")
+	data, err := fs.ReadFile(volume)
+	require.NoError(t, err)
+	repeated := bytes.Repeat(data, (2<<20)/len(data)+1)
+	for _, corrupt := range []bool{false, true} {
+		if corrupt {
+			repeated[len(repeated)-3] ^= 1
+		}
+		require.NoError(t, fs.WriteFile(volume, repeated))
+		d, err := newDecoder(testFileIO{t, fs}, DoNothingDecoderDelegate{}, filepath.Join(dir, "file.par2"), 4, defaultScanPolicy(), 0)
+		require.NoError(t, err)
+		err = d.LoadParityData()
+		if corrupt {
+			require.ErrorContains(t, err, "hash mismatch")
+		} else {
+			require.NoError(t, err)
+			require.Equal(t, 2, d.ShardCounts().UsableParityShardCount)
+		}
+	}
+}

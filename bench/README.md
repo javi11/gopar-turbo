@@ -84,3 +84,45 @@ Building `par2cmdline-turbo` (autotools; needs `automake`):
 git clone --depth 1 --recurse-submodules https://github.com/animetosho/par2cmdline-turbo.git
 cd par2cmdline-turbo && ./automake.sh && ./configure && make -j
 ```
+
+## Deep repair comparison with parfast
+
+`deep.py` compares fresh copies of a deterministic set, validates every repaired
+file with SHA-256, records per-process peak RSS and logs, alternates tool order,
+and rejects failed or timed-out runs. It supports macOS and Linux. Staging,
+damage, cache warming and validation are outside the measured interval.
+
+Create a fixture in a **new empty directory** (about 285 MiB):
+
+```sh
+mkdir /tmp/deep-fixture
+python3 - <<'PY'
+from pathlib import Path
+import random
+rng = random.Random(20261021)
+for i in range(10):
+    Path(f'/tmp/deep-fixture/data{i:02}.bin').write_bytes(rng.randbytes(1000 * 16384))
+PY
+parfast create -q -s16384 -c8192 -n8 /tmp/deep-fixture/recovery.par2 /tmp/deep-fixture/data*.bin
+go build -o /tmp/gopar-deep ./cmd/par2bench
+python3 bench/deep.py --fixture /tmp/deep-fixture \
+  --parfast /absolute/path/to/parfast --gopar /tmp/gopar-deep \
+  --output /tmp/deep-results --repeat 3
+```
+
+Use a fresh output directory for each comparison. `manifest.json` captures data
+and binary hashes; `results.jsonl` includes arguments, timing, checksum status,
+timeout and exit status. The fixture must have sufficient recovery blocks for
+the requested `--missing` depths. See [RESULTS.md](RESULTS.md) for measured limits.
+
+For an equal configured-memory comparison, add `--memory-mib 512` (or another
+budget). This passes the same MiB value to parfast's `-m` and gopar's
+`MemoryBudget`; it is recorded in the manifest and exact command arguments.
+These are working-buffer budgets, not identical process-RSS limits. Without
+this option each tool uses its own default.
+
+To test larger blocks, use a separate empty fixture directory and replace
+`16384` with `131072` in the generation and creation commands above. Pass
+`--slice-size 131072` to the harness. That fixture contains 1.22 GiB of data
+and about 1 GiB of recovery data. Keep default-budget results separate from
+equal-budget comparisons.

@@ -62,3 +62,17 @@ func BenchmarkFoldInputs_ApplyMatrixReference(b *testing.B) {
 		c.applyMatrix(m, in, out)
 	}
 }
+
+func BenchmarkFoldInputsParallelLargeSlice(b *testing.B) {
+	const size = 4 << 20
+	m := gf2p16.NewMatrixFromFunction(1, 32, func(i, j int) gf2p16.T { return gf2p16.T(j + 1) })
+	out := [][]byte{make([]byte, size)}
+	b.ReportAllocs()
+	b.SetBytes(32 * size)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := FoldInputsParallel(m, 32, size, func(j int, buf []byte) error { buf[0] = byte(j); return nil }, out, 4); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

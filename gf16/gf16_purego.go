@@ -10,8 +10,9 @@ func Accelerated() bool { return false }
 // Context is the pure-Go fallback backend. The prepared layout is the
 // identity (a plain copy), stride is 2 bytes (one GF(2^16) word).
 type Context struct {
-	sliceSize int
-	bufSize   int
+	batchScratch []byte
+	sliceSize    int
+	bufSize      int
 }
 
 func NewContext(sliceSize int) (*Context, error) {
@@ -25,6 +26,8 @@ func (c *Context) MethodName() string { return "gf2p16 (pure Go)" }
 func (c *Context) BufSize() int       { return c.bufSize }
 func (c *Context) Stride() int        { return 2 }
 func (c *Context) NewBuffer() []byte  { return alignedSlice(c.bufSize, 16) }
+
+func (c *Context) NewBuffers(count int) [][]byte { return bufferBank(c.bufSize, 16, count) }
 
 func (c *Context) Prepare(dst, src []byte) {
 	if len(dst) != c.bufSize || len(src) > c.sliceSize || len(src) == 0 {

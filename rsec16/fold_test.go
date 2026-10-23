@@ -3,6 +3,7 @@ package rsec16
 import (
 	"errors"
 	"math/rand"
+	"runtime"
 	"testing"
 
 	"github.com/javi11/gopar-turbo/gf2p16"
@@ -165,7 +166,7 @@ func TestFoldInputsParallelMatchesApplyMatrix(t *testing.T) {
 			for i := range got {
 				got[i] = make([]byte, tc.sliceSize)
 			}
-			err := FoldInputs(m, tc.numInputs, tc.sliceSize, func(j int, buf []byte) error {
+			err := FoldInputsParallel(m, tc.numInputs, tc.sliceSize, func(j int, buf []byte) error {
 				copy(buf, in[j])
 				return nil
 			}, got, tc.numGoroutines)
@@ -206,4 +207,53 @@ func TestFoldInputsPropagatesMidBatchError(t *testing.T) {
 		return nil
 	}, out, 8)
 	require.ErrorIs(t, err, errShardRead)
+}
+
+// Catch the real allocation regression: one large output must not stage
+// 48 full input slices. Measure the fold itself, excluding caller buffers.
+func TestFoldInputsParallelLargeSliceMemory(t *testing.T) {
+	const size = 4 << 20
+	m := gf2p16.NewMatrixFromFunction(1, 32, func(i, j int) gf2p16.T { return 1 })
+	out := [][]byte{make([]byte, size)}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	err := FoldInputsParallel(m, 32, size, func(j int, buf []byte) error {
+		buf[0] = byte(j + 1)
+		return nil
+	}, out, 4)
+	runtime.ReadMemStats(&after)
+	require.NoError(t, err)
+	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(64<<20))
+	require.Equal(t, byte(32), out[0][0])
+	require.Zero(t, out[0][size-1])
+}
+
+func TestFoldInputsParallelAdaptiveBatch(t *testing.T) {
+	const size, count, outputs = 512 << 10, 17, 4
+	in := make([][]byte, count)
+	rng := rand.New(rand.NewSource(57))
+	for j := range in {
+		in[j] = make([]byte, size)
+		rng.Read(in[j][:size-2*j]) // trailing padding and partial reads
+	}
+	m := gf2p16.NewMatrixFromFunction(outputs, count, func(i, j int) gf2p16.T { return gf2p16.T(1 + i*count + j) })
+	got, want := make([][]byte, outputs), make([][]byte, outputs)
+	for i := range got {
+		got[i] = make([]byte, size)
+		want[i] = make([]byte, size)
+	}
+	applyMatrixParallelData(m, in, want, 3)
+	require.NoError(t, FoldInputsParallel(m, count, size, func(j int, buf []byte) error {
+		copy(buf, in[j][:size-2*j])
+		return nil
+	}, got, 3))
+	require.Equal(t, want, got)
+	require.ErrorIs(t, FoldInputsParallel(m, count, size, func(j int, buf []byte) error {
+		if j == 7 {
+			return errShardRead
+		}
+		copy(buf, in[j])
+		return nil
+	}, got, 3), errShardRead)
 }

@@ -74,6 +74,16 @@ func computePacketHash(setID recoverySetID, packetType packetType, body []byte) 
 }
 
 func readNextPacket(buf *bytes.Buffer) (recoverySetID, packetType, []byte, error) {
+	setID, typ, body, err := readNextPacketBorrowed(buf)
+	if err != nil {
+		return setID, typ, nil, err
+	}
+	return setID, typ, append([]byte(nil), body...), nil
+}
+
+// readNextPacketBorrowed validates a packet and returns a body that aliases
+// buf. Streaming callers must finish consuming it before reusing the buffer.
+func readNextPacketBorrowed(buf *bytes.Buffer) (recoverySetID, packetType, []byte, error) {
 	h, err := readPacketHeader(buf)
 	if err != nil {
 		return [16]byte{}, packetType{}, nil, err
@@ -90,9 +100,7 @@ func readNextPacket(buf *bytes.Buffer) (recoverySetID, packetType, []byte, error
 		return [16]byte{}, packetType{}, nil, errors.New("hash mismatch")
 	}
 
-	bodyCopy := make([]byte, len(body))
-	copy(bodyCopy, body)
-	return h.RecoverySetID, h.Type, bodyCopy, nil
+	return h.RecoverySetID, h.Type, body, nil
 }
 
 func writeNextPacket(buf *bytes.Buffer, setID recoverySetID, packetType packetType, body []byte) error {

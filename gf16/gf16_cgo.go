@@ -29,11 +29,14 @@ func Accelerated() bool { return true }
 // Context wraps one ParPar Galois16Mul instance. Not safe for concurrent
 // Mul/MulAdd/MulAddMulti; Prepare/Finish are safe to call concurrently.
 type Context struct {
-	ctx       *C.gf16_ctx_t
-	sliceSize int
-	bufSize   int
-	stride    int
-	align     int
+	batchScratch []byte
+	method       string
+	plainLayout  bool
+	ctx          *C.gf16_ctx_t
+	sliceSize    int
+	bufSize      int
+	stride       int
+	align        int
 }
 
 func NewContext(sliceSize int) (*Context, error) {
@@ -46,16 +49,18 @@ func NewContext(sliceSize int) (*Context, error) {
 	}
 	c := &Context{
 		ctx:       ctx,
+		method:    C.GoString(C.gf16_method_name(ctx)),
 		sliceSize: sliceSize,
 		bufSize:   int(C.gf16_buf_size(ctx)),
 		stride:    int(C.gf16_stride(ctx)),
 		align:     int(C.gf16_alignment(ctx)),
 	}
+	c.plainLayout = c.method == "CLMul (NEON)" || c.method == "CLMul (SHA3)"
 	runtime.SetFinalizer(c, (*Context).Close)
 	return c, nil
 }
 
-func (c *Context) MethodName() string { return C.GoString(C.gf16_method_name(c.ctx)) }
+func (c *Context) MethodName() string { return c.method }
 
 // affineAVX2BuiltIn reports whether the GFNI/AVX2 affine translation unit was
 // compiled with -mgfni. See gf16_affine_avx2_built in bridge.h.
@@ -65,9 +70,17 @@ func (c *Context) Stride() int  { return c.stride }
 
 func (c *Context) NewBuffer() []byte { return alignedSlice(c.bufSize, c.align) }
 
+// NewBuffers allocates an aligned bank of equally sized prepared buffers.
+func (c *Context) NewBuffers(count int) [][]byte { return bufferBank(c.bufSize, c.align, count) }
+
 func (c *Context) Prepare(dst, src []byte) {
 	if len(dst) != c.bufSize || len(src) > c.sliceSize || len(src) == 0 {
 		panic("gf16: Prepare buffer size mismatch")
+	}
+	if c.plainLayout {
+		copy(dst, src)
+		clear(dst[len(src):])
+		return
 	}
 	C.gf16_prepare(c.ctx, unsafe.Pointer(&dst[0]), unsafe.Pointer(&src[0]), C.size_t(len(src)))
 }
@@ -76,7 +89,9 @@ func (c *Context) Finish(buf, out []byte) {
 	if len(buf) != c.bufSize || len(out) > c.sliceSize {
 		panic("gf16: Finish buffer size mismatch")
 	}
-	C.gf16_finish(c.ctx, unsafe.Pointer(&buf[0]))
+	if !c.plainLayout {
+		C.gf16_finish(c.ctx, unsafe.Pointer(&buf[0]))
+	}
 	copy(out, buf)
 }
 

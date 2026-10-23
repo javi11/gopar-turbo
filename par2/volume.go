@@ -45,7 +45,7 @@ func walkPackets(r io.ReaderAt, size int64, fn func(setID recoverySetID, typ pac
 			return err
 		}
 
-		setID, typ, body, err := readNextPacket(bytes.NewBuffer(packetBuf))
+		setID, typ, body, err := readNextPacketBorrowed(bytes.NewBuffer(packetBuf))
 		if err != nil {
 			return err
 		}
@@ -94,6 +94,7 @@ func indexPackets(r io.ReaderAt, size int64) ([]packetRef, error) {
 
 // readPacketAt reads and validates the packet at ref, exactly as
 // walkPackets does for one packet. buf is scratch and is grown as needed.
+// The returned body aliases buf until its next reuse.
 func readPacketAt(r io.ReaderAt, ref packetRef, buf *[]byte) (recoverySetID, packetType, []byte, error) {
 	if int64(cap(*buf)) < ref.length {
 		*buf = make([]byte, ref.length)
@@ -102,7 +103,7 @@ func readPacketAt(r io.ReaderAt, ref packetRef, buf *[]byte) (recoverySetID, pac
 	if _, err := r.ReadAt(*buf, ref.offset); err != nil {
 		return recoverySetID{}, packetType{}, nil, err
 	}
-	return readNextPacket(bytes.NewBuffer(*buf))
+	return readNextPacketBorrowed(bytes.NewBuffer(*buf))
 }
 
 // readRecoveryExponent reads only the 4-byte exponent of the recovery packet

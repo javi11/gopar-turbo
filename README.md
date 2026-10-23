@@ -73,17 +73,22 @@ leaves the originals untouched. On APFS and Linux reflink filesystems the
 temporary is a copy-on-write clone of the damaged file, so only the
 reconstructed slices are actually written.
 
-Accumulators default to at most 256 MB; `MemoryBudget` lowers that further,
-splitting slices into byte ranges and making several passes over the inputs:
+Bulk reconstruction buffers default to a budget of at most 512 MiB,
+including input staging and both prepared and output accumulators.
+`MemoryBudget` can lower that budget or raise it to reduce scattered I/O
+on large repairs. Slices are split into byte ranges when needed:
 
 ```go
 par2.Repair("recovery.par2", par2.RepairOptions{
-    MemoryBudget: 64 << 20, // 0 = the 256 MB default
+    MemoryBudget: 64 << 20, // 0 = up to 512 MiB; larger values are also honored
 })
 ```
 
-The trade is one extra pass over the data in exchange for bounded memory,
-which is the same trade par2cmdline makes.
+Smaller budgets increase the number of passes and positional I/O operations.
+Matrices, scan windows, metadata and native contexts are additional memory;
+this option is not a process RSS cap, and tiny budgets still need minimum-sized,
+aligned buffers. The optional `DoubleCheck` reads each data byte once across
+its chunk passes and computes only the recovery blocks actually present.
 
 ## The gf16 package (streaming consumers)
 
@@ -198,3 +203,21 @@ archive must pin the same version.
   ([gf16/vendor/LICENSE](gf16/vendor/LICENSE)).
 - **No code from par2cmdline-turbo (GPLv2) is included.** Its kernels are the
   same CC0 ParPar sources vendored here directly.
+
+## Deep repair planning
+
+Disk repairs with at least 1,024 missing blocks, at least 8,388,608 data×missing
+pairs, consecutive selected recovery exponents and a buffer budget of at least
+64 MiB use an additive GF(2¹⁶) transform. This avoids allocating and inverting a
+dense reconstruction matrix. Consecutive smaller repairs use closed-form
+coefficients where beneficial; irregular exponent sets retain the general
+matrix solver. The ordinary `rsec16.Coder` API retains matrix reconstruction.
+
+The transform workspace is reused across byte ranges and released after the
+repair. The default 512 MiB budget covers bulk arithmetic buffers, including
+native allocations; plans, scan buffers and other metadata add to process RSS.
+See [deep repair measurements](bench/RESULTS.md) and the
+[reproducible comparison](bench/README.md). Measurements cover both 16 KiB and
+128 KiB block fixtures and report remaining gaps against parfast. They do not
+establish a bound for cold disks or reproduce the reported hour-long production
+repair.

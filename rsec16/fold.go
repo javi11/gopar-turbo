@@ -107,10 +107,10 @@ func foldInputsGF16(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, 
 		ctx.Prepare(accs[i], zero)
 	}
 
-	B := foldBatchSize
-	if B > numInputs {
-		B = numInputs
-	}
+	// Bound input staging for large slices when few outputs need repair.
+	// Retain larger batches for many outputs to reuse hot source bytes.
+	const inputStagingTarget = 8 << 20
+	B := min(foldBatchSize, numInputs, max(1, inputStagingTarget/sliceSize/3, len(out)))
 
 	// Two batch banks: the reader prepares bank k^1 while workers fold bank k.
 	var banks [2][][]byte
@@ -160,7 +160,7 @@ func foldInputsGF16(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, 
 	// buffer (Prepare is stateless), bounded by numGoroutines.
 	rawCount := 1
 	if parallelRead {
-		rawCount = B
+		rawCount = min(B, numGoroutines)
 	}
 	raws := make([][]byte, rawCount)
 	for i := range raws {
@@ -183,16 +183,15 @@ func foldInputsGF16(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, 
 		}
 		if parallelRead && n > 1 {
 			errs := make([]error, n)
-			sem := make(chan struct{}, numGoroutines)
 			var wg sync.WaitGroup
-			for b := 0; b < n; b++ {
+			for w := 0; w < min(rawCount, n); w++ {
 				wg.Add(1)
-				sem <- struct{}{}
-				go func(b int) {
+				go func(w int) {
 					defer wg.Done()
-					defer func() { <-sem }()
-					errs[b] = loadOne(base+b, raws[b], bank[b])
-				}(b)
+					for b := w; b < n; b += rawCount {
+						errs[b] = loadOne(base+b, raws[w], bank[b])
+					}
+				}(w)
 			}
 			wg.Wait()
 			for _, err := range errs {
