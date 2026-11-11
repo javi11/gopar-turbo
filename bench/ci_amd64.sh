@@ -194,8 +194,9 @@ gobench() {
   fi
 }
 
-e2e() {
-  local data="$OUT/dataset" files=${FILES:-6} mib=${FILE_MIB:-96} redundancy=${REDUNDANCY:-30} corrupt=${CORRUPT_SLICES:-50}
+mkdataset() {
+  local data="$OUT/dataset" files=${FILES:-6} mib=${FILE_MIB:-96} redundancy=${REDUNDANCY:-30}
+  [ -f "$data/recovery.par2" ] && return 0
   command -v par2 >/dev/null || sudo apt-get install -y par2 >/dev/null
   mkdir -p "$data"
   # Deterministic incompressible data, then a PAR2 set from par2cmdline.
@@ -211,7 +212,65 @@ PY
   (cd "$data" && par2 create -q -s2380956 -r"$redundancy" -n1 recovery.par2 data*.bin)
   (cd "$data" && par2 verify -q recovery.par2)   # pristine must verify clean
   ls -l "$data" >"$OUT/e2e/dataset-listing.txt"
+}
 
+# profile: where does repair time go? One repair-missing and one repair-corrupt
+# per arm under perf (software clock sampling; VMs expose no HW counters) plus
+# perf stat for page faults / context switches / CPU time, and a Go CPU profile
+# for the new binary. Output: $OUT/profile/*, top symbols into the summary.
+profile() {
+  local data="$OUT/dataset" corrupt=${CORRUPT_SLICES:-50} P="$OUT/profile" arm sc
+  mkdir -p "$P"
+  mkdataset
+  sudo apt-get install -y linux-tools-common "linux-tools-$(uname -r)" >/dev/null 2>&1 \
+    || sudo apt-get install -y linux-tools-generic >/dev/null 2>&1 || true
+  sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0 >/dev/null 2>&1 || true
+  local PERF; PERF=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | tail -1); PERF=${PERF:-perf}
+  "$PERF" --version | tee "$P/perf-version.txt" || { md "_perf unavailable_"; return 0; }
+  local arms=("base-auto|$OUT/bin/base-par2bench|")
+  if [ "$(shuffle_label)" = base-shuffle-avx2 ] && forced_ok "$AVX2_KERNEL"; then
+    arms+=("base-shuffle-avx2|$OUT/bin/base-par2bench|GF16_FORCE_METHOD=$AVX2_KERNEL")
+  fi
+  arms+=("avx2|$OUT/bin/new-par2bench|GOPAR_GF16_KERNEL=$AVX2_KERNEL")
+  arms+=("default|$OUT/bin/new-par2bench|")
+  have_gfni && arms+=("unverified|$OUT/bin/unv-par2bench|")
+  for sc in missing corrupt; do
+    for a in "${arms[@]}"; do
+      IFS='|' read -r arm bin envs <<<"$a"
+      local w="$OUT/profile/work-$sc-$arm"
+      rm -rf "$w"; mkdir -p "$w"; cp --reflink=auto "$data"/* "$w"/
+      python3 "$ROOT/bench/damage.py" "$w" --mode "$sc" --count "$([ $sc = missing ] && echo 1 || echo "$corrupt")" \
+        --slice-size 2380956 --seed 1337 >/dev/null
+      cat "$w"/* >/dev/null
+      echo "== $sc $arm" | tee -a "$P/stat.txt"
+      (cd "$w" && env ${envs:+"$envs"} "$PERF" stat -e task-clock,page-faults,context-switches,cpu-migrations \
+         -o "$P/stat-$sc-$arm.txt" -- "$bin" -op repair -par recovery.par2 \
+         -cpuprofile "$P/cpu-$sc-$arm.pprof" >/dev/null)
+      cat "$P/stat-$sc-$arm.txt" >>"$P/stat.txt"
+      # Second run of the same damage under perf record.
+      rm -rf "$w"; mkdir -p "$w"; cp --reflink=auto "$data"/* "$w"/
+      python3 "$ROOT/bench/damage.py" "$w" --mode "$sc" --count "$([ $sc = missing ] && echo 1 || echo "$corrupt")" \
+        --slice-size 2380956 --seed 1337 >/dev/null
+      cat "$w"/* >/dev/null
+      (cd "$w" && env ${envs:+"$envs"} "$PERF" record -F 2000 -g -o "$P/perf-$sc-$arm.data" -- \
+         "$bin" -op repair -par recovery.par2 >/dev/null 2>"$P/record-$sc-$arm.err") || true
+      "$PERF" report -i "$P/perf-$sc-$arm.data" --no-children --sort dso,symbol -g none --percent-limit 0.7 \
+         --stdio 2>/dev/null | grep -v '^#' | grep -v '^$' >"$P/top-$sc-$arm.txt" || true
+      rm -rf "$w"
+    done
+  done
+  md "## Profile (perf stat)"; fence <"$P/stat.txt"
+  for sc in missing corrupt; do
+    for a in "${arms[@]}"; do
+      arm=${a%%|*}
+      md "### top symbols: repair-$sc / $arm"; head -30 "$P/top-$sc-$arm.txt" | fence
+    done
+  done
+}
+
+e2e() {
+  local data="$OUT/dataset" files=${FILES:-6} mib=${FILE_MIB:-96} redundancy=${REDUNDANCY:-30} corrupt=${CORRUPT_SLICES:-50}
+  mkdataset
   local SHUF_ARM=()
   if [ "$(shuffle_label)" = base-shuffle-avx2 ] && forced_ok "$AVX2_KERNEL"; then
     SHUF_ARM=("base-shuffle-avx2=$OUT/bin/base-par2bench@GF16_FORCE_METHOD=$AVX2_KERNEL")
@@ -251,4 +310,4 @@ PY
   if [ "$rc" != 0 ]; then md "**FAILED: repair mismatch or crashed run, see log.txt**"; exit "$rc"; fi
 }
 
-"${1:?usage: ci_amd64.sh cpuinfo|build|gobench|e2e}"
+"${1:?usage: ci_amd64.sh cpuinfo|build|gobench|e2e|profile}"

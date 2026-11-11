@@ -1,0 +1,32 @@
+name: profile-amd64
+
+# Diagnostic job (not a gate): perf/pprof profiles of repair-missing and
+# repair-corrupt for the cgo baseline and the Go-asm backend on one runner.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: [".github/workflows/profile-amd64.yml", "bench/ci_amd64.sh"]
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - run: bench/ci_amd64.sh cpuinfo
+      - run: bench/ci_amd64.sh build
+      - run: bench/ci_amd64.sh profile
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: profile-amd64-raw
+          path: |
+            bench-out/profile/**
+            !bench-out/profile/work-*/**
+            !bench-out/profile/*.data
