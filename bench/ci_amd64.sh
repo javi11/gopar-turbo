@@ -84,8 +84,8 @@ gobench_pkg() { # pkg regex benchtime
     for ((j = 0; j < ${#V[@]}; j++)); do
       IFS='|' read -r name bin envs <<<"${V[$(((i + j) % ${#V[@]}))]}"
       echo "sample $i $name" >>"$dir/$pkg.order"
-      # shellcheck disable=SC2086
-      env $envs "$bin" -test.run '^$' -test.bench "$re" -test.benchtime "$bt" \
+      # envs holds one KEY=VALUE (value may contain spaces), so no word splitting.
+      env ${envs:+"$envs"} "$bin" -test.run '^$' -test.bench "$re" -test.benchtime "$bt" \
         >>"$dir/$pkg-$name.txt" || { echo "FAILED: $pkg $name" >&2; exit 1; }
     done
   done
