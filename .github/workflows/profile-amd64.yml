@@ -14,6 +14,8 @@ jobs:
   profile:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      PREV_REF: f5516c4
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }

@@ -108,6 +108,12 @@ build() {
   CGO_ENABLED=0 go build -o "$OUT/bin/new-par2bench" ./cmd/par2bench
   CGO_ENABLED=0 go test -c -o "$OUT/bin/new-rsec16.test" ./rsec16
   CGO_ENABLED=0 go test -c -o "$OUT/bin/new-gf16.test" ./gf16
+  if [ -n "${PREV_REF:-}" ]; then
+    # Earlier revision of this tree, for before/after arms (sweep).
+    git -C "$ROOT" worktree add --detach "$ROOT/../prev" "$PREV_REF"
+    (cd "$ROOT/../prev" && CGO_ENABLED=0 go build -o "$OUT/bin/prev-par2bench" ./cmd/par2bench \
+      && CGO_ENABLED=0 go test -c -o "$OUT/bin/prev-rsec16.test" ./rsec16)
+  fi
   go install golang.org/x/perf/cmd/benchstat@latest
 
   md "## Kernels auto-selected on this CPU"
@@ -298,7 +304,7 @@ sweep() {
   local P="$OUT/sweep" i j label envs lab
   mkdir -p "$P"; mkdataset
   local S='Shuffle (AVX2)'
-  local arms=${SWEEP_ARMS:-$'default|\natomic|GOPAR_FOLD_ATOMIC=1\navx2|GOPAR_GF16_KERNEL=Shuffle (AVX2)\navx2-atomic|GOPAR_FOLD_ATOMIC=1,GOPAR_GF16_KERNEL=Shuffle (AVX2)\navx2-pf|GOPAR_GF16_KERNEL=Shuffle (AVX2+pf)\navx2-pf-atomic|GOPAR_FOLD_ATOMIC=1,GOPAR_GF16_KERNEL=Shuffle (AVX2+pf)\natomic-r64|GOPAR_FOLD_ATOMIC=1,GOPAR_FOLD_RANGE=65536\natomic-r256|GOPAR_FOLD_ATOMIC=1,GOPAR_FOLD_RANGE=262144'}
+  local arms=${SWEEP_ARMS:-$'prev-default|\nprev-avx2|GOPAR_GF16_KERNEL=Shuffle (AVX2)\ndefault|\navx2|GOPAR_GF16_KERNEL=Shuffle (AVX2)'}
   mapfile -t A <<<"$arms"
   # Base arms: C default method, and C forced to Shuffle (AVX2) when auto differs.
   local B_=("base-auto|")
@@ -308,7 +314,7 @@ sweep() {
   for ((i = 0; i < ${SAMPLES:-8}; i++)); do
     for ((j = 0; j < ${#all[@]}; j++)); do
       IFS='|' read -r label envs <<<"${all[$(((i + j) % ${#all[@]}))]}"
-      local bin="$OUT/bin/new-rsec16.test"; [[ $label == base-* ]] && bin="$OUT/bin/base-rsec16.test"
+      local bin="$OUT/bin/new-rsec16.test"; [[ $label == base-* ]] && bin="$OUT/bin/base-rsec16.test"; [[ $label == prev-* ]] && bin="$OUT/bin/prev-rsec16.test"
       IFS=, read -ra E <<<"$envs"
       env "${E[@]}" "$bin" -test.run '^$' -test.bench 'FoldInputs_Realistic$' -test.benchtime 3x >>"$P/fold-$label.txt"
     done
@@ -317,7 +323,7 @@ sweep() {
   local bins=()
   for lab in "${all[@]}"; do
     IFS='|' read -r label envs <<<"$lab"
-    local bin="$OUT/bin/new-par2bench"; [[ $label == base-* ]] && bin="$OUT/bin/base-par2bench"
+    local bin="$OUT/bin/new-par2bench"; [[ $label == base-* ]] && bin="$OUT/bin/base-par2bench"; [[ $label == prev-* ]] && bin="$OUT/bin/prev-par2bench"
     bins+=("$label=$bin${envs:+@$envs}")
   done
   python3 "$ROOT/bench/interleave.py" --reps "${REPS:-7}" --pristine "$OUT/dataset" \
