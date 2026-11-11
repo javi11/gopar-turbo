@@ -1,7 +1,10 @@
 package rsec16
 
 import (
+	"os"
+	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/javi11/gopar-turbo/gf16"
 	"github.com/javi11/gopar-turbo/gf2p16"
@@ -71,6 +74,13 @@ type foldUnit struct {
 	done   *sync.WaitGroup
 }
 
+func envInt(name string, def int) int {
+	if v, err := strconv.Atoi(os.Getenv(name)); err == nil && v > 0 {
+		return v
+	}
+	return def
+}
+
 func foldInputsGF16(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, buf []byte) error, out [][]byte, numGoroutines int, parallelRead bool) error {
 	ctx, err := gf16.NewContext(sliceSize)
 	if err != nil {
@@ -110,7 +120,7 @@ func foldInputsGF16(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, 
 	// Bound input staging for large slices when few outputs need repair.
 	// Retain larger batches for many outputs to reuse hot source bytes.
 	const inputStagingTarget = 8 << 20
-	B := min(foldBatchSize, numInputs, max(1, inputStagingTarget/sliceSize/3, len(out)))
+	B := min(envInt("GOPAR_FOLD_B", foldBatchSize), numInputs, max(1, inputStagingTarget/sliceSize/3, len(out)))
 
 	// Two batch banks: the reader prepares bank k^1 while workers fold bank k.
 	var banks [2][][]byte
@@ -126,7 +136,7 @@ func foldInputsGF16(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, 
 	// range-major, so every accumulator's unit for a range reuses the same
 	// hot source bytes instead of re-streaming the whole batch from DRAM
 	// per accumulator.
-	const targetRange = 128 << 10
+	targetRange := envInt("GOPAR_FOLD_RANGE", 128<<10)
 	perRange := targetRange - targetRange%stride
 	if perRange < stride {
 		perRange = stride
@@ -139,17 +149,20 @@ func foldInputsGF16(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, 
 	// Long-lived workers on a persistent channel; the per-batch barrier is a
 	// WaitGroup counting units, so workers and contexts survive across
 	// batches.
+	atomicMode := envInt("GOPAR_FOLD_ATOMIC", 0) != 0
 	units := make(chan foldUnit)
 	var workers sync.WaitGroup
-	workers.Add(numGoroutines)
-	for w := 0; w < numGoroutines; w++ {
-		go func(wctx *gf16.Context) {
-			defer workers.Done()
-			for u := range units {
-				wctx.MulAddMulti(u.acc, u.srcs, u.offset, u.length, u.coeffs)
-				u.done.Done()
-			}
-		}(workerCtxs[w])
+	if !atomicMode {
+		workers.Add(numGoroutines)
+		for w := 0; w < numGoroutines; w++ {
+			go func(wctx *gf16.Context) {
+				defer workers.Done()
+				for u := range units {
+					wctx.MulAddMulti(u.acc, u.srcs, u.offset, u.length, u.coeffs)
+					u.done.Done()
+				}
+			}(workerCtxs[w])
+		}
 	}
 
 	// readBank fills bank with up to B prepared inputs starting at nextJ,
@@ -239,6 +252,39 @@ func foldInputsGF16(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, 
 		}(banks[k^1])
 
 		var batchDone sync.WaitGroup
+		if atomicMode {
+			total := numRanges * len(accs)
+			var cursor atomic.Int64
+			srcs, bc := banks[k][:n], coeffs
+			run := func(wctx *gf16.Context) {
+				for {
+					u := int(cursor.Add(1)) - 1
+					if u >= total {
+						return
+					}
+					r, i := u/len(accs), u%len(accs)
+					offset := r * perRange
+					length := min(perRange, bufSize-offset)
+					wctx.MulAddMulti(accs[i], srcs, offset, length, bc[i])
+				}
+			}
+			batchDone.Add(numGoroutines - 1)
+			for w := 1; w < numGoroutines; w++ {
+				go func(wctx *gf16.Context) {
+					defer batchDone.Done()
+					run(wctx)
+				}(workerCtxs[w])
+			}
+			run(workerCtxs[0])
+			batchDone.Wait()
+			p := <-ready
+			if p.err != nil {
+				foldErr = p.err
+			}
+			n, coeffs = p.n, p.coeffs
+			k ^= 1
+			continue
+		}
 		for r := 0; r < numRanges; r++ {
 			offset := r * perRange
 			length := perRange

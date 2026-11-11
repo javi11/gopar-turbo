@@ -280,6 +280,38 @@ profile() {
   done
 }
 
+# sweep: fold-loop knob experiments. FoldInputs_Realistic (package level) and
+# repair-missing/corrupt end to end, base-auto (C default method) vs the new
+# default kernel under env knobs, all interleaved. Knob sets: $SWEEP_ARMS, one
+# "label|ENV=V ENV=V" per line (empty env = unmodified default).
+sweep() {
+  local P="$OUT/sweep" i j label envs
+  mkdir -p "$P"; mkdataset
+  local arms=${SWEEP_ARMS:-$'default|\natomic|GOPAR_FOLD_ATOMIC=1\natomic-r64|GOPAR_FOLD_ATOMIC=1 GOPAR_FOLD_RANGE=65536\natomic-r256|GOPAR_FOLD_ATOMIC=1 GOPAR_FOLD_RANGE=262144\natomic-b32|GOPAR_FOLD_ATOMIC=1 GOPAR_FOLD_B=32\natomic-b8|GOPAR_FOLD_ATOMIC=1 GOPAR_FOLD_B=8\nchan-r64|GOPAR_FOLD_RANGE=65536'}
+  mapfile -t A <<<"$arms"
+  : >"$P/fold-base.txt"
+  for lab in "${A[@]}"; do : >"$P/fold-${lab%%|*}.txt"; done
+  for ((i = 0; i < ${SAMPLES:-8}; i++)); do
+    env "$OUT/bin/base-rsec16.test" -test.run '^$' -test.bench 'FoldInputs_Realistic$' -test.benchtime 3x >>"$P/fold-base.txt"
+    for ((j = 0; j < ${#A[@]}; j++)); do
+      IFS='|' read -r label envs <<<"${A[$(((i + j) % ${#A[@]}))]}"
+      env $envs "$OUT/bin/new-rsec16.test" -test.run '^$' -test.bench 'FoldInputs_Realistic$' -test.benchtime 3x >>"$P/fold-$label.txt"
+    done
+  done
+  local files=("C=$P/fold-base.txt")
+  for lab in "${A[@]}"; do files+=("${lab%%|*}=$P/fold-${lab%%|*}.txt"); done
+  md "## Sweep: FoldInputs_Realistic"; "$(go env GOPATH)/bin/benchstat" "${files[@]}" | tee "$P/fold-benchstat.txt" | fence
+  local bins=("base-auto=$OUT/bin/base-par2bench")
+  for lab in "${A[@]}"; do
+    IFS='|' read -r label envs <<<"$lab"
+    bins+=("$label=$OUT/bin/new-par2bench${envs:+@${envs// /,}}")
+  done
+  python3 "$ROOT/bench/interleave.py" --reps "${REPS:-7}" --pristine "$OUT/dataset" \
+    --work "$P/work" --results "$P/e2e" --slice-size 2380956 --missing-files 1 \
+    --corrupt-slices "${CORRUPT_SLICES:-50}" --scenarios repair-missing,repair-corrupt "${bins[@]}" 2>&1 | tee "$P/e2e.log"
+  md "## Sweep: end-to-end"; fence <"$P/e2e/summary.md"
+}
+
 e2e() {
   local data="$OUT/dataset" files=${FILES:-6} mib=${FILE_MIB:-96} redundancy=${REDUNDANCY:-30} corrupt=${CORRUPT_SLICES:-50}
   mkdataset
@@ -322,4 +354,4 @@ PY
   if [ "$rc" != 0 ]; then md "**FAILED: repair mismatch or crashed run, see log.txt**"; exit "$rc"; fi
 }
 
-"${1:?usage: ci_amd64.sh cpuinfo|build|gobench|e2e|profile}"
+"${1:?usage: ci_amd64.sh cpuinfo|build|gobench|e2e|profile|sweep}"
