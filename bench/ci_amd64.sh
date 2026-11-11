@@ -197,7 +197,13 @@ gobench() {
 mkdataset() {
   local data="$OUT/dataset" files=${FILES:-6} mib=${FILE_MIB:-96} redundancy=${REDUNDANCY:-30}
   [ -f "$data/recovery.par2" ] && return 0
-  command -v par2 >/dev/null || { sudo sh -c "sed -i 's|security.ubuntu.com|azure.archive.ubuntu.com|g' /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null" || true; for _ in 1 2 3; do sudo apt-get update -qq >/dev/null 2>&1; sudo apt-get install -y par2 >/dev/null && break; sleep 5; done; }
+  # par2cmdline: apt first (the runner's security mirror is sometimes
+  # unreachable), then a throwaway ubuntu:24.04 container.
+  par2run() {
+    if command -v par2 >/dev/null; then par2 "$@"
+    else docker run --rm -v "$PWD":/w -w /w ubuntu:24.04 sh -c 'command -v par2 >/dev/null || { apt-get update -qq >/dev/null && apt-get install -y -qq par2 >/dev/null; }; par2 "$@"' sh "$@"; fi
+  }
+  command -v par2 >/dev/null || sudo apt-get install -y par2 >/dev/null 2>&1 || true
   mkdir -p "$data"
   # Deterministic incompressible data, then a PAR2 set from par2cmdline.
   python3 - "$data" "$files" "$mib" <<'PY'
@@ -209,8 +215,8 @@ for i in range(n):
         for _ in range(mib):
             f.write(rng.randbytes(1 << 20))
 PY
-  (cd "$data" && par2 create -q -s2380956 -r"$redundancy" -n1 recovery.par2 data*.bin)
-  (cd "$data" && par2 verify -q recovery.par2)   # pristine must verify clean
+  (cd "$data" && par2run create -q -s2380956 -r"$redundancy" -n1 recovery.par2 data*.bin)
+  (cd "$data" && par2run verify -q recovery.par2)   # pristine must verify clean
   ls -l "$data" >"$OUT/e2e/dataset-listing.txt"
 }
 
