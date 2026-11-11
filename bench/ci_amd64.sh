@@ -330,6 +330,7 @@ sweep() {
     --work "$P/work" --results "$P/e2e" --slice-size 2380956 --missing-files 1 \
     --corrupt-slices "${CORRUPT_SLICES:-50}" --scenarios repair-missing,repair-corrupt "${bins[@]}" 2>&1 | tee "$P/e2e.log"
   md "## Sweep: end-to-end"; fence <"$P/e2e/summary.md"
+  python3 -I "$ROOT/bench/sweep_summary.py" "$P" | tee "$P/summary.txt" | fence
 }
 
 e2e() {
