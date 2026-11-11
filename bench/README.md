@@ -59,16 +59,21 @@ members produced the same false mismatch.
 ## Running it
 
 ```bash
-go build -o /tmp/par2bench-cgo ./cmd/par2bench/
-CGO_ENABLED=0 go build -o /tmp/par2bench-pure ./cmd/par2bench/
+go build -o /tmp/par2bench ./cmd/par2bench/
 
 python3 bench/run.py \
   --dataset my-set --pristine /path/to/pristine --index recovery.par2 \
   --work /tmp/bench-work --results /tmp/bench-results \
-  --gopar-cgo /tmp/par2bench-cgo --gopar-pure /tmp/par2bench-pure \
+  --gopar /tmp/par2bench \
   --par2-turbo /path/to/par2cmdline-turbo/par2 \
   --slice-size 2380956 --reps 3 --missing-files 5 --corrupt-slices 200
 ```
+
+gopar-turbo is pure Go plus Go assembly; there is no cgo build. The driver runs
+the one `par2bench` binary twice: as is (arm `gopar-turbo (SIMD)`, the default
+kernel for the host) and with `GOPAR_GF16_KERNEL=purego` (arm
+`gopar-turbo (pure Go)`). Result files dated before this change label the SIMD
+arm `gopar-turbo (cgo/SIMD)`; those are history and describe the old C backend.
 
 `--parfast /path/to/parfast` optionally adds [nzbfast's parfast](https://github.com/nzbfast/nzbfast/releases)
 as two extra arms: its default (per-block checksum verdicts) and `--slow`

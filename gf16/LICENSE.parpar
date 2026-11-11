@@ -1,0 +1,25 @@
+Attribution
+===========
+
+The GF(2^16) kernels in this package (gf16/*.s, gf16/clmul_arm64.go,
+gf16/x86_amd64.go, gf16/affine_*amd64*.go and their generators in
+gf16/asmgen/) are Go-assembly ports of the algorithms in ParPar's gf16
+library by Anime Tosho (https://github.com/animetosho/ParPar): the CLMul
+(NEON/SHA3), Shuffle (SSSE3/AVX2) and Affine2x (GFNI) methods and their
+prepared-data layouts. ParPar's sources were distributed under the CC0 1.0
+public domain dedication reproduced below; no licence obliges attribution,
+but it is given here because the port is derived from that work.
+
+CC0 1.0 Universal (CC0 1.0) Public Domain Dedication
+
+The person who associated a work with this deed has dedicated the work to the
+public domain by waiving all of his or her rights to the work worldwide under
+copyright law, including all related and neighboring rights, to the extent
+allowed by law.
+
+You can copy, modify, distribute and perform the work, even for commercial
+purposes, all without asking permission.
+
+https://creativecommons.org/publicdomain/zero/1.0/
+
+Source: https://github.com/animetosho/ParPar

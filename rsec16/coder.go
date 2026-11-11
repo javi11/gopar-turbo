@@ -15,16 +15,28 @@ import (
 // parameter to pass into NewCoderCauchy and
 // NewCoderPAR2Vandermonde. This is not necessarily GOMAXPROCS.
 func DefaultNumGoroutines() int {
-	numGoroutines := runtime.GOMAXPROCS(0)
-	physicalCores := cpuid.CPU.PhysicalCores
-	// Use the number of physical cores as the default instead of
-	// the number of virtual cores, which GOMAXPROCS
-	// is. Hyperthreading doesn't actually help our workload, and
-	// indeed it hurts it a bit.
-	if physicalCores < numGoroutines {
-		numGoroutines = physicalCores
+	return goroutineCount(runtime.GOMAXPROCS(0), cpuid.CPU.PhysicalCores, cpuid.CPU.LogicalCores)
+}
+
+// goroutineCount picks the worker count from GOMAXPROCS and the physical and
+// logical core counts. Use the number of physical cores instead of virtual
+// ones when known: hyperthreading doesn't help our workload, and indeed it
+// hurts it a bit. The physical count is 0 when CPUID cannot report it (for
+// example under Rosetta or in some VMs and containers); then the logical
+// count, then runtime.NumCPU, stand in. The result is at least 1.
+func goroutineCount(maxProcs, physical, logical int) int {
+	cores := physical
+	if cores <= 0 {
+		cores = logical
 	}
-	return numGoroutines
+	if cores <= 0 {
+		cores = runtime.NumCPU()
+	}
+	n := maxProcs
+	if cores < n {
+		n = cores
+	}
+	return max(n, 1)
 }
 
 // A Coder is an object that can generate parity shards, verify parity

@@ -131,8 +131,9 @@ def build_tools(args):
     # that behind -N. The "-N" row is the like-for-like damaged comparison;
     # the plain row is each tool's default behaviour.
     tools = [
-        ("gopar-turbo (cgo/SIMD)", lambda op, idx: [args.gopar_cgo, "-op", op, "-par", idx]),
-        ("gopar-turbo (pure Go)",  lambda op, idx: [args.gopar_pure, "-op", op, "-par", idx]),
+        ("gopar-turbo (SIMD)",    lambda op, idx: [args.gopar, "-op", op, "-par", idx]),
+        # The same binary with the portable kernel forced (GOPAR_GF16_KERNEL).
+        ("gopar-turbo (pure Go)",  lambda op, idx: ["env", "GOPAR_GF16_KERNEL=purego", args.gopar, "-op", op, "-par", idx]),
         ("par2cmdline-turbo",      lambda op, idx: [args.par2_turbo, op, "-q", idx]),
         ("par2cmdline (stock)",    lambda op, idx: [args.par2_stock, op, "-q", idx]),
         ("par2turbo -N (misalign)", lambda op, idx: [args.par2_turbo, op, "-q", "-N", idx]),
@@ -154,8 +155,7 @@ def main():
     ap.add_argument("--index", required=True, help="PAR2 index filename inside the set")
     ap.add_argument("--work", required=True)
     ap.add_argument("--results", required=True)
-    ap.add_argument("--gopar-cgo", required=True)
-    ap.add_argument("--gopar-pure", required=True)
+    ap.add_argument("--gopar", required=True, help="par2bench binary (go build ./cmd/par2bench)")
     ap.add_argument("--par2-turbo", required=True)
     ap.add_argument("--par2-stock", default="/opt/homebrew/bin/par2")
     ap.add_argument("--parfast", default="",

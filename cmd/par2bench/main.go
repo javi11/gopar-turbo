@@ -58,7 +58,7 @@ func main() {
 		FindMisaligned: *findMisaligned,
 	}
 	if r.Accelerated {
-		r.Backend = "cgo/ParPar SIMD"
+		r.Backend = "Go assembly SIMD"
 	} else {
 		r.Backend = "pure-Go gf2p16"
 	}

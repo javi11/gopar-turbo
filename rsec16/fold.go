@@ -79,7 +79,7 @@ func foldInputsGF16(m gf2p16.Matrix, numInputs, sliceSize int, next func(j int, 
 	defer ctx.Close()
 	bufSize, stride := ctx.BufSize(), ctx.Stride()
 
-	// One context per worker, created up front: Mul* calls share mutScratch,
+	// One context per worker, created up front: MulAddMulti keeps per-context scratch,
 	// so a context cannot serve concurrent calls (see applyMatrixGF16).
 	workerCtxs := make([]*gf16.Context, numGoroutines)
 	for w := range workerCtxs {

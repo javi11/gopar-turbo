@@ -2,9 +2,12 @@
 
 SIMD-accelerated **PAR2 verify and repair** for Go, with a
 [gopar](https://github.com/akalin/gopar)-compatible API. The GF(2^16)
-Reed-Solomon hot loop runs on [ParPar](https://github.com/animetosho/ParPar)'s
-SIMD kernels (SSE2 … AVX-512/GFNI on amd64, NEON/SVE2 on arm64) via cgo, with
-runtime CPU detection and a pure-Go fallback for `CGO_ENABLED=0` builds.
+Reed-Solomon hot loop runs on Go-assembly ports of
+[ParPar](https://github.com/animetosho/ParPar)'s SIMD algorithms (NEON/SHA3 on
+arm64, SSSE3/AVX2 on amd64) selected at runtime by CPU detection, with a
+portable pure-Go fallback. It is plain Go: no cgo, no C toolchain, no
+prebuilt libraries — it cross-compiles like any Go module and works with
+`CGO_ENABLED=0`.
 
 It is the repair-side companion to [par2go](https://github.com/javi11/par2go):
 par2go creates PAR2 sets, gopar-turbo verifies and repairs them. (An encode
@@ -17,10 +20,9 @@ creation is par2go's job and is not a supported surface here.)
 go get github.com/javi11/gopar-turbo
 ```
 
-Requires Go 1.26+. With cgo enabled (the default), prebuilt static libraries
-are linked automatically on darwin (universal), linux/amd64, linux/arm64, and
-windows/amd64 (MinGW required on Windows). Everywhere else — or with
-`CGO_ENABLED=0` — the pure-Go backend is used, with identical results.
+Requires Go 1.25+ (see `go.mod`). Nothing else is needed: the assembly kernels
+are built by the Go toolchain on every platform, and platforms without a
+kernel use the pure-Go backend with identical results.
 
 ## Verify and repair
 
@@ -136,6 +138,35 @@ sub-ranges for data parallelism.
 
 ## Performance
 
+### Go assembly backend vs the former cgo backend
+
+Re-measured on 2026-11-11 against the last commit with the C backend (9c0f5ca),
+on an Apple M4 (10 cores, Go 1.27, kernel "CLMul (SHA3)" in both builds). The
+set is 10 random 100 MiB files (1000 MiB), 2,380,956-byte slices, 68 recovery
+blocks (15%), created with stock par2cmdline; warm cache, median of 10
+interleaved reps, every repair MD5-checked against pristine:
+
+| Scenario | cgo (C kernel) | Go asm | cgo peak RSS | Go asm peak RSS | Correct (Go asm) |
+|---|---:|---:|---:|---:|:---:|
+| verify-intact | 0.20s | 0.20s | 58 MB | 58 MB | — |
+| verify-damaged (50 slices) | 0.18s | 0.18s | 58 MB | 58 MB | — |
+| repair-missing (1 file) | 0.58s | 0.58s | 414 MB | 406 MB | 10/10 |
+| repair-corrupt (65 slices) | 0.70s | 0.67s | 508 MB | 498 MB | 10/10 |
+
+The honest reading is parity, slightly ahead on repair-corrupt: repairs finish
+in well under a second here, and the machine was not idle (load average ~3-4).
+These are arm64 (Apple M4) numbers only. amd64 performance of the Go assembly
+kernels has not been measured on real x86 hardware, the GFNI kernels are behind
+the `gf16unverified` build tag and have never been executed, and ParPar's
+AVX-512 kernels are not ported, so on GFNI/AVX-512 CPUs the default build is
+expected to be slower than the former C backend until those are validated.
+Details, `rsec16` package benchmarks and caveats:
+[bench/RESULTS.md](bench/RESULTS.md#2026-11-11-go-assembly-backend-vs-the-former-cgo-parpar-c-backend).
+
+> The tables below this point are historical: they were measured with the
+> previous cgo/C kernel backend, before the port to Go assembly, and have not
+> been re-measured.
+
 End to end on a real 4.36 GiB Usenet release (47 files, 2,380,956-byte
 slices, 295 recovery blocks, 15% redundancy) on an Apple M4 with 10 cores,
 warm cache, against [par2cmdline-turbo](https://github.com/animetosho/par2cmdline-turbo)
@@ -175,49 +206,64 @@ Reproduce with:
 
 ```bash
 go test ./rsec16/ -bench . -benchtime 2s
-CGO_ENABLED=0 go test ./rsec16/ -bench . -benchtime 2s
+GOPAR_GF16_KERNEL=purego go test ./rsec16/ -bench . -benchtime 2s
 ```
 
 ## Backends
 
-| Build | Backend | Methods |
+The `gf16` package picks the fastest kernel the CPU supports at startup:
+
+| Architecture | Kernels (best last) | Notes |
 |---|---|---|
-| `CGO_ENABLED=1` (supported platforms) | ParPar kernels | runtime-selected: Shuffle (SSSE3/AVX2/AVX-512/VBMI), Affine (GFNI), XOR-JIT, CLMul (NEON/SHA3/SVE2), … |
-| `CGO_ENABLED=0` or other platforms | pure Go (`gf2p16`) | SSSE3 assembly on amd64, scalar elsewhere |
+| arm64 | `CLMul (NEON)`, `CLMul (SHA3)` | PMULL carry-less multiply; SHA3 adds `EOR3` where the CPU has it |
+| amd64 | `Shuffle (SSSE3)`, `Shuffle (AVX2)` | PSHUFB nibble tables, built per coefficient from constant tables inside the assembly |
+| amd64, `-tags gf16unverified` | adds `Affine2x (GFNI+AVX2)`, `Affine2x (GFNI+AVX512)` | see below |
+| anything else | pure Go (`gf2p16`) | also used when forced, see below |
 
-Both backends produce bit-identical output; the test suite runs every test
-against whichever backend is built, and CI runs both.
+All kernels, and the pure-Go path, produce bit-identical output; the test
+suite compares every kernel the host can run against the pure-Go reference,
+and CI runs the suite through each of them.
 
-## Rebuilding the static libraries
+**`gf16unverified` build tag.** The GFNI kernels assemble and vet, but their
+instructions could not be executed where they were written, so their
+differential tests have never run on real hardware. They are compiled only
+with `-tags gf16unverified` and are never part of a default build. On a
+GFNI machine, `go test -tags gf16unverified ./gf16` runs the same tests
+against them (the tests pick up any kernel the CPU can run); the tag is
+meant to be dropped once that has been verified.
+
+**`GOPAR_GF16_KERNEL`.** Set this environment variable to the exact kernel
+name (as `Context.MethodName()` reports it, e.g. `CLMul (NEON)`) or to
+`purego` to override the default choice, for example to run the whole stack
+on a non-default kernel or to compare against the portable path:
 
 ```bash
-make -C gf16 darwin        # macOS universal (arm64 + x86_64)
-make -C gf16 linux/amd64   # on a linux/amd64 host
-make -C gf16 linux/arm64   # on a linux/arm64 host
-make -C gf16 windows/amd64 # in an MSYS2/MinGW64 shell
+GOPAR_GF16_KERNEL="Shuffle (SSSE3)" go test ./rsec16 ./par2
+GOPAR_GF16_KERNEL=purego go test ./rsec16/ -bench .
 ```
 
-`.github/workflows/build-libs.yml` builds all four in CI and commits the
-resulting `gf16/libgf16_*.a` back to the branch. It runs automatically on any
-push that touches `gf16/vendor/**`, `gf16/csrc/**`, `gf16/bridge.h` or
-`gf16/Makefile`, and can also be started manually from the Actions tab
-(`workflow_dispatch`).
+It is read once at startup. An unknown name, or a kernel the CPU cannot run,
+is ignored and the default is kept.
 
-The Windows lane pins MinGW GCC to a fixed version (`15.2.0-14`). MSYS2 is a
-rolling release and GCC 16 dropped the emulated-TLS `std::call_once` symbols
-that older libstdc++ emitted, so an unpinned toolchain produces a library that
-fails to link in consumers. Downstream projects linking the prebuilt Windows
-archive must pin the same version.
+The kernel assembly is generated: `go generate ./gf16/...` runs
+`gf16/asmgen` to rewrite `clmul_arm64.s`, `shuffle_amd64.s` and
+`affine_amd64.s` (run it with `GOARCH=amd64` for the amd64 files). The
+committed files must equal the generator output.
+
+`go run asmgen/x86.go -surrogate=<file>` (from `gf16/`) writes a development
+only variant of the affine kernels with `GF2P8AFFINEQB` replaced by XOR, to a
+file other than `affine_amd64.s`; its products are wrong, it carries a loud
+marker, and a test fails if it ever lands in `affine_amd64.s`.
 
 ## Licensing
 
 - gopar-turbo: MIT ([LICENSE](LICENSE)).
 - Forked gopar packages (`gf2`, `gf2p16`, `rsec16`, `par2`, `memfs`): MIT,
   © Frederick Akalin ([LICENSE.gopar](LICENSE.gopar)).
-- Vendored ParPar gf16 kernels (`gf16/vendor`): CC0 / public domain
-  ([gf16/vendor/LICENSE](gf16/vendor/LICENSE)).
-- **No code from par2cmdline-turbo (GPLv2) is included.** Its kernels are the
-  same CC0 ParPar sources vendored here directly.
+- The `gf16` assembly kernels and their generators are ports of ParPar's
+  algorithms (CC0 / public domain); attribution and the dedication text are
+  in [gf16/LICENSE.parpar](gf16/LICENSE.parpar).
+- **No code from par2cmdline-turbo (GPLv2) is included.**
 
 ## Deep repair planning
 

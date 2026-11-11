@@ -19,8 +19,8 @@ const (
 	OpInverseButterfly
 )
 
-// Operation is one region operation. Its fixed-width layout matches the C
-// batch executor so a transform crosses cgo once per batch, not per butterfly.
+// Operation is one region operation. Transforms are expressed as a batch of
+// operations that Apply executes in order, merging adjacent runs.
 type Operation struct {
 	Dst, Src    uint32
 	Coeff, Kind uint16
@@ -30,7 +30,7 @@ type Operation struct {
 // buffers and their backing arrays unchanged until Close. Concurrent Apply
 // calls require distinct contexts and disjoint destinations/sources; Close
 // must wait for all calls. Contexts must have the registering context's layout.
-// The cgo backend pins the buffers until Close. Always defer Close immediately.
+// Always defer Close immediately.
 type BufferSet struct {
 	count, size int
 	rows        [][]byte
@@ -89,9 +89,9 @@ func (s *BufferSet) Close() {
 	}
 }
 
-// NewBufferWorkspace owns a bank of prepared buffers until Close. On SIMD
-// builds the bulk bank lives outside the Go heap to avoid GC/scavenger work
-// during transforms. Do not retain Buffers or use them after Close.
+// NewBufferWorkspace owns one contiguous, aligned bank of prepared buffers
+// until Close (adjacent rows can be merged into longer kernel passes). Do not
+// retain Buffers or use them after Close.
 func NewBufferWorkspace(ctx *Context, count int) (*BufferSet, error) {
 	if ctx == nil || count <= 0 {
 		return nil, errors.New("gf16: invalid buffer workspace")

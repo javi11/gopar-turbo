@@ -180,9 +180,9 @@ func TestBufferSetButterflies(t *testing.T) {
 	}
 }
 
-// Repeated registration must remain safe after the Go buffers from a previous
-// pointer table become unreachable and the native allocator reuses its memory.
-// Run with GOEXPERIMENT=cgocheck2 GOGC=10 to stress write barriers as well.
+// Repeated registration must remain safe after buffers from a previous set
+// become unreachable and the allocator reuses their memory. Run with
+// GOGC=10 to stress the collector as well.
 func TestBufferSetRegistrationAcrossGC(t *testing.T) {
 	ctx, err := NewContext(130)
 	require.NoError(t, err)
