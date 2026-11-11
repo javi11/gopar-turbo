@@ -155,11 +155,9 @@ interleaved reps, every repair MD5-checked against pristine:
 
 The honest reading is parity, slightly ahead on repair-corrupt: repairs finish
 in well under a second here, and the machine was not idle (load average ~3-4).
-These are arm64 (Apple M4) numbers only. amd64 performance of the Go assembly
-kernels has not been measured on real x86 hardware, the GFNI kernels are behind
-the `gf16unverified` build tag and have never been executed, and ParPar's
-AVX-512 kernels are not ported, so on GFNI/AVX-512 CPUs the default build is
-expected to be slower than the former C backend until those are validated.
+These are arm64 (Apple M4) numbers only. amd64 numbers come from the `bench-amd64` CI workflow (see
+[bench/RESULTS.md](bench/RESULTS.md)); the GFNI kernels are part of the default
+build and are selected at run time only on CPUs with GFNI.
 Details, `rsec16` package benchmarks and caveats:
 [bench/RESULTS.md](bench/RESULTS.md#2026-11-11-go-assembly-backend-vs-the-former-cgo-parpar-c-backend).
 
@@ -216,21 +214,20 @@ The `gf16` package picks the fastest kernel the CPU supports at startup:
 | Architecture | Kernels (best last) | Notes |
 |---|---|---|
 | arm64 | `CLMul (NEON)`, `CLMul (SHA3)` | PMULL carry-less multiply; SHA3 adds `EOR3` where the CPU has it |
-| amd64 | `Shuffle (SSSE3)`, `Shuffle (AVX2)` | PSHUFB nibble tables, built per coefficient from constant tables inside the assembly |
-| amd64, `-tags gf16unverified` | adds `Affine2x (GFNI+AVX2)`, `Affine2x (GFNI+AVX512)` | see below |
+| amd64 | `Shuffle (SSSE3)`, `Shuffle (AVX2)`, then `Affine2x (GFNI+AVX2)`, `Affine2x (GFNI+AVX512)` where the CPU has GFNI | PSHUFB nibble tables built per coefficient inside the assembly; GF2P8AFFINEQB matrices for the Affine2x kernels |
 | anything else | pure Go (`gf2p16`) | also used when forced, see below |
 
 All kernels, and the pure-Go path, produce bit-identical output; the test
 suite compares every kernel the host can run against the pure-Go reference,
 and CI runs the suite through each of them.
 
-**`gf16unverified` build tag.** The GFNI kernels assemble and vet, but their
-instructions could not be executed where they were written, so their
-differential tests have never run on real hardware. They are compiled only
-with `-tags gf16unverified` and are never part of a default build. On a
-GFNI machine, `go test -tags gf16unverified ./gf16` runs the same tests
-against them (the tests pick up any kernel the CPU can run); the tag is
-meant to be dropped once that has been verified.
+**GFNI kernels.** The Affine2x kernels are registered only when CPUID reports
+GFNI together with AVX2 (or AVX512F/BW/VL), and the CPUID library only reports
+those features when the OS has enabled the matching register state (XGETBV), so
+they are never selected where they cannot run. They passed the full
+differential suite on real GFNI+AVX-512 hardware in CI (Intel Xeon 8573C, AMD
+EPYC 9V74). On a GFNI machine `go test ./gf16` exercises them; elsewhere the
+default falls back to Shuffle.
 
 **`GOPAR_GF16_KERNEL`.** Set this environment variable to the exact kernel
 name (as `Context.MethodName()` reports it, e.g. `CLMul (NEON)`) or to

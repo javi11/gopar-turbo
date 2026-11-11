@@ -1,5 +1,3 @@
-//go:build gf16unverified
-
 package gf16
 
 import (
@@ -20,11 +18,12 @@ import (
 //
 // gives product = norm ^ swapqwords(swap): [Mll*lo ^ Mlh*hi | Mhh*hi ^ Mhl*lo].
 
-// UNVERIFIED: these kernels assemble and vet, but the instructions (GFNI,
-// AVX-512) could not be executed where they were written, so the shared
-// differential tests have never run against them. Build with -tags
-// gf16unverified on a GFNI machine and run `go test ./gf16`: the tests pick
-// the kernels up automatically through kernelVariants.
+// Verified on real GFNI hardware in CI: the shared differential tests pick the
+// kernels up through kernelVariants wherever the CPU can run them. They are
+// registered only when cpuid reports GFNI plus the vector extensions each
+// needs; cpuid sets the AVX/AVX-512 flags only if the OS has enabled the
+// matching register state (XGETBV), so a kernel is never chosen on a system
+// that cannot save its registers.
 
 const (
 	affineStrideAVX2   = 32

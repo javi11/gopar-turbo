@@ -103,24 +103,19 @@ build() {
     && CGO_ENABLED=1 go test -c -o "$OUT/bin/base-rsec16.test" ./rsec16)
   [ "$GF16_COMPARE" = 1 ] && (cd "$BASE" && CGO_ENABLED=1 go test -c -o "$OUT/bin/base-gf16.test" ./gf16)
 
-  # New code: default tags, and the GFNI kernels behind gf16unverified.
+  # New code: default build (GFNI kernels included, chosen at run time).
   cd "$ROOT"
-  for v in new:"" unv:"-tags gf16unverified"; do
-    n=${v%%:*}; tags=${v#*:}
-    # shellcheck disable=SC2086
-    CGO_ENABLED=0 go build $tags -o "$OUT/bin/$n-par2bench" ./cmd/par2bench
-    CGO_ENABLED=0 go test -c $tags -o "$OUT/bin/$n-rsec16.test" ./rsec16
-    CGO_ENABLED=0 go test -c $tags -o "$OUT/bin/$n-gf16.test" ./gf16
-  done
+  CGO_ENABLED=0 go build -o "$OUT/bin/new-par2bench" ./cmd/par2bench
+  CGO_ENABLED=0 go test -c -o "$OUT/bin/new-rsec16.test" ./rsec16
+  CGO_ENABLED=0 go test -c -o "$OUT/bin/new-gf16.test" ./gf16
   go install golang.org/x/perf/cmd/benchstat@latest
 
   md "## Kernels auto-selected on this CPU"
   md "Default build:"; "$OUT/bin/new-gf16.test" -test.run TestPrintKernels -test.v | fence
-  md "\`-tags gf16unverified\`:"; "$OUT/bin/unv-gf16.test" -test.run TestPrintKernels -test.v | fence
   # What the C backend picks on this CPU, and proof that forcing works.
   BASE_AUTO=$(GF16_FORCE_METHOD='' env -u GF16_FORCE_METHOD "$OUT/bin/base-method.test" -test.run TestBaseMethod -test.v 2>&1 | sed -n 's/.*BASE_METHOD=//p' | head -1)
   echo "$BASE_AUTO" >"$OUT/base_auto_name"
-  local unv_name; unv_name=$("$OUT/bin/unv-gf16.test" -test.run TestPrintKernels -test.v 2>&1 | sed -n 's/.*default kernel: \(.*\) (accelerated.*/\1/p' | head -1)
+  local new_name; new_name=$("$OUT/bin/new-gf16.test" -test.run TestPrintKernels -test.v 2>&1 | sed -n 's/.*default kernel: \(.*\) (accelerated.*/\1/p' | head -1)
   : >"$OUT/base_forced.txt"
   local want got
   for want in "Shuffle (AVX2)" "Affine (GFNI+AVX2)" "Affine (GFNI+AVX512)"; do
@@ -129,7 +124,7 @@ build() {
     [ "$got" = "$want" ] && echo "$want" >>"$OUT/base_forced_ok"
   done
   md "## C (cgo) backend method selection"
-  md "ParPar \`default_method()\` (AUTO) on this CPU picks: **$BASE_AUTO**. New unverified build default: **$unv_name**."
+  md "ParPar \`default_method()\` (AUTO) on this CPU picks: **$BASE_AUTO**. New build default: **$new_name**."
   md "Forcing check (patched baseline, \`GF16_FORCE_METHOD\`; a method the CPU/build cannot run silently falls back, in which case its arm is dropped):"
   fence <"$OUT/base_forced.txt"
   [ "$GF16_COMPARE" = 1 ] || md "_gf16 kernel benchmarks skipped: public-API bench file did not compile against the baseline._"
@@ -140,7 +135,7 @@ build() {
 # even on a GFNI-capable CPU. Base arms: auto = C default_method(); shuffle =
 # C forced to Shuffle (AVX2). On a GFNI+AVX-512 CPU auto is already an Affine
 # method, so base-auto doubles as the C affine arm (the like-for-like opponent
-# of the unverified GFNI build); on CPUs where auto is Shuffle (AVX2) it doubles
+# of the new default on GFNI CPUs); on CPUs where auto is Shuffle (AVX2) it doubles
 # as the shuffle arm.
 base_auto() { cat "$OUT/base_auto_name"; }
 forced_ok() { grep -qxF "$1" "$OUT/base_forced_ok" 2>/dev/null; }
@@ -152,9 +147,6 @@ variants() { # $1 = package
   fi
   echo "avx2|$OUT/bin/new-$1.test|GOPAR_GF16_KERNEL=$AVX2_KERNEL"
   echo "default|$OUT/bin/new-$1.test|"
-  # Without GFNI the unverified build selects the same kernel as the default
-  # one, so the arm would only duplicate it.
-  have_gfni && echo "unverified|$OUT/bin/unv-$1.test|"
   return 0
 }
 have_gfni() { grep -q -m1 -w gfni /proc/cpuinfo; }
@@ -185,8 +177,8 @@ gobench_pkg() { # pkg regex benchtime
     "$bs" "C-shuffle-avx2=$dir/$pkg-$sl.txt" "new-shuffle-avx2=$dir/$pkg-avx2.txt" | tee "$dir/$pkg-lfl-shuffle.txt" | fence
   fi
   if have_gfni && [[ "$(base_auto)" == Affine* ]]; then
-    md "**GFNI: C \`base-auto\` ($(base_auto)) vs new \`unverified\` (see kernel list above for its name)**"
-    "$bs" "C-affine=$dir/$pkg-base-auto.txt" "new-gfni=$dir/$pkg-unverified.txt" | tee "$dir/$pkg-lfl-gfni.txt" | fence
+    md "**GFNI: C \`base-auto\` ($(base_auto)) vs new \`default\` (see kernel list above for its name)**"
+    "$bs" "C-affine=$dir/$pkg-base-auto.txt" "new-gfni=$dir/$pkg-default.txt" | tee "$dir/$pkg-lfl-gfni.txt" | fence
   fi
   "$bs" "${files[@]}" >"$dir/$pkg-benchstat.txt"
   md "<details><summary>$pkg: all arms vs base-auto (C default)</summary>" ""
@@ -196,7 +188,6 @@ gobench_pkg() { # pkg regex benchtime
 
 gobench() {
   md "## Package benchmarks"
-  have_gfni || md "_No GFNI on this CPU: the \`-tags gf16unverified\` arm would select the same kernel as \`default\` and is omitted._"
   gobench_pkg rsec16 "$RSEC_RE" "$RSEC_BENCHTIME"
   if [ "$(cat "$OUT/gf16_compare")" = 1 ]; then
     gobench_pkg gf16 "$GF16_RE" "$GF16_BENCHTIME"
@@ -232,12 +223,11 @@ PY
     "base-auto=$OUT/bin/base-par2bench" \
     "${SHUF_ARM[@]}" \
     "avx2=$OUT/bin/new-par2bench@GOPAR_GF16_KERNEL=$AVX2_KERNEL" \
-    "default=$OUT/bin/new-par2bench" \
-    $(have_gfni && echo "unverified=$OUT/bin/unv-par2bench") 2>&1 | tee "$OUT/e2e/log.txt"
+    "default=$OUT/bin/new-par2bench"  2>&1 | tee "$OUT/e2e/log.txt"
   local rc=${PIPESTATUS[0]}
   set -e
   md "## End-to-end ($files x ${mib} MiB, slice 2380956, ${redundancy}% redundancy, 1 file deleted / $corrupt slices corrupted, $REPS reps, interleaved)" \
-     "\`base-auto\` = old C/cgo backend, its own default method ($(base_auto)); \`base-shuffle-avx2\` = C forced to Shuffle (AVX2) (absent when auto already is that); \`avx2\` = new code with \`GOPAR_GF16_KERNEL=$AVX2_KERNEL\`; \`default\` = new code, auto kernel; \`unverified\` = \`-tags gf16unverified\`, auto kernel. Overlap = min..max ranges of baseline and arm intersect (a crude noise indicator)."
+     "\`base-auto\` = old C/cgo backend, its own default method ($(base_auto)); \`base-shuffle-avx2\` = C forced to Shuffle (AVX2) (absent when auto already is that); \`avx2\` = new code with \`GOPAR_GF16_KERNEL=$AVX2_KERNEL\`; \`default\` = new code, auto kernel (GFNI Affine2x where the CPU has it); Overlap = min..max ranges of baseline and arm intersect (a crude noise indicator)."
   python3 - "$OUT/e2e/results.csv" "$(shuffle_label)" "$(have_gfni && [[ "$(base_auto)" == Affine* ]] && echo yes)" >>"$SUMMARY" <<'PY'
 import csv, statistics, sys
 path, shuf, gfni = sys.argv[1:4]
@@ -246,7 +236,7 @@ for r in csv.DictReader(open(path)):
     if r["exit_code"] == "0":
         t.setdefault((r["scenario"], r["label"]), []).append(float(r["seconds"]))
 pairs = [(shuf, "avx2", "Shuffle (AVX2): C vs new")]
-if gfni: pairs.append(("base-auto", "unverified", "GFNI: C Affine (auto) vs new unverified"))
+if gfni: pairs.append(("base-auto", "default", "GFNI: C Affine (auto) vs new default"))
 print("\n### End-to-end like-for-like (median seconds; + = new slower; overlap = min..max ranges intersect, i.e. within noise)\n")
 print("| Comparison | Scenario | C | new | new vs C | ranges overlap |\n|---|---|---:|---:|---:|:---:|")
 for c, n, title in pairs:

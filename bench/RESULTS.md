@@ -507,10 +507,7 @@ Geomean time: −4.76%.
   differences are small in absolute terms. The honest reading is parity,
   slightly ahead on repair-corrupt. The machine was not idle (load average
   ~3-4).
-- All numbers are arm64 (Apple M4) only. **amd64 performance of the Go assembly
-  kernels (Shuffle SSSE3/AVX2) has not been measured on real x86 hardware.** The
-  GFNI kernels are behind the `gf16unverified` build tag and have never been
-  executed, and ParPar's AVX-512 kernels are not ported, so on GFNI/AVX-512 CPUs
-  the default build is expected to be slower than the former C backend until
-  those are validated.
+- All numbers are arm64 (Apple M4) only. **amd64 performance is measured by the `bench-amd64` CI workflow, not here.** The
+  GFNI kernels are part of the default build and are chosen at run time on
+  CPUs with GFNI.
 - No comparison against par2cmdline-turbo was rerun for this section.

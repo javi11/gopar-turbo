@@ -1,8 +1,7 @@
 // Package gfmodel holds slow, obviously correct Go models of the tables and
 // matrices the amd64 GF(2^16) kernels build in assembly (or, for the
-// unverified GFNI kernels, in Go). Default builds of package gf16 use it only
-// from tests, so it adds no code to the binary; the gf16unverified build
-// links it for the GF2P8AFFINEQB matrices.
+// GFNI kernels, in Go). The shuffle table model is used only from tests; the
+// amd64 build links the package for the GF2P8AFFINEQB matrices.
 package gfmodel
 
 import "math/bits"

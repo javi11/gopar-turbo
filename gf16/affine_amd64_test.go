@@ -1,5 +1,3 @@
-//go:build gf16unverified
-
 package gf16
 
 import (

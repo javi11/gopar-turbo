@@ -12,8 +12,7 @@ import (
 // GF2P8AFFINEQB development output (see asmgen/x86.go).
 const surrogateMarker = "GF16_SURROGATE_OUTPUT"
 
-// TestCommittedAffineAssembly guards the GFNI kernels (built only with
-// -tags gf16unverified) against a committed surrogate file, whose products
+// TestCommittedAffineAssembly guards the GFNI kernels against a committed surrogate file, whose products
 // would be silently wrong. It reads the files as text, so it runs on every
 // host.
 func TestCommittedAffineAssembly(t *testing.T) {

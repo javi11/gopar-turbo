@@ -6,10 +6,9 @@
 //   - arm64: "CLMul (NEON)" (PMULL, every arm64 CPU) and "CLMul (SHA3)"
 //     (the same with EOR3, preferred where available);
 //   - amd64: "Shuffle (SSSE3)" and "Shuffle (AVX2)" (PSHUFB nibble tables,
-//     built inline from the coefficient); with the gf16unverified
-//     build tag also "Affine2x (GFNI+AVX2)" and "Affine2x (GFNI+AVX512)",
-//     which have not been run on real GFNI hardware by the author and are
-//     therefore never compiled into default builds;
+//     built inline from the coefficient), plus
+//     "Affine2x (GFNI+AVX2)" and "Affine2x (GFNI+AVX512)" (GF2P8AFFINEQB) on
+//     CPUs with GFNI, preferred over Shuffle there;
 //   - everything else: the pure-Go path.
 //
 // The kernels are ports of the algorithms of ParPar (see LICENSE.parpar).

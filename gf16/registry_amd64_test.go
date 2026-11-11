@@ -1,5 +1,3 @@
-//go:build gf16unverified
-
 package gf16
 
 import (
@@ -9,8 +7,7 @@ import (
 	"github.com/klauspost/cpuid/v2"
 )
 
-// TestUnverifiedAffineKernelsRequireGFNI: with the gf16unverified tag the
-// Affine2x kernels are registered exactly when the CPU reports GFNI together
+// TestUnverifiedAffineKernelsRequireGFNI: the Affine2x kernels are registered exactly when the CPU reports GFNI together
 // with the vector extensions each needs.
 func TestUnverifiedAffineKernelsRequireGFNI(t *testing.T) {
 	cpu := cpuid.CPU

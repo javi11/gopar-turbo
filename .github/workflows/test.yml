@@ -64,10 +64,10 @@ jobs:
         run: go test ./rsec16 ./par2 -count=1
         env: { GOPAR_GF16_KERNEL: "${{ matrix.kernel }}" }
 
-  # GFNI kernels are compiled only with the gf16unverified tag. The shared
-  # differential tests pick up whichever of them the runner CPU can execute;
-  # on CPUs without GFNI the run only checks that the tagged build compiles
-  # and the log shows no GFNI kernel was exercised.
+  # GFNI kernels are part of the default build and chosen at run time. The
+  # shared differential tests pick up whichever of them the runner CPU can
+  # execute; on CPUs without GFNI this job only shows the CPU flags and the
+  # fallback to the Shuffle kernels.
   gfni:
     runs-on: ubuntu-latest
     steps:
@@ -76,13 +76,13 @@ jobs:
         with: { go-version-file: go.mod }
       - name: CPU features
         run: grep -o -w -E 'gfni|avx2|avx512f|avx512bw|avx512vl' /proc/cpuinfo | sort | uniq -c
-      - name: Test gf16 with gf16unverified
+      - name: Test gf16 (default build)
         run: |
-          go test -tags gf16unverified ./gf16 -run TestPrintKernels -v -count=1
-          go test -tags gf16unverified ./gf16 -count=1
+          go test ./gf16 -run TestPrintKernels -v -count=1
+          go test ./gf16 -count=1
       - name: Test rsec16 and par2 with each GFNI kernel
         run: |
           for k in "Affine2x (GFNI+AVX2)" "Affine2x (GFNI+AVX512)"; do
             echo "== $k"
-            GOPAR_GF16_KERNEL="$k" go test -tags gf16unverified ./rsec16 ./par2 -count=1
+            GOPAR_GF16_KERNEL="$k" go test ./rsec16 ./par2 -count=1
           done
