@@ -113,7 +113,7 @@ gobench() {
 }
 
 e2e() {
-  local data="$OUT/dataset" files=${FILES:-8} mib=${FILE_MIB:-48}
+  local data="$OUT/dataset" files=${FILES:-6} mib=${FILE_MIB:-96} redundancy=${REDUNDANCY:-30} corrupt=${CORRUPT_SLICES:-50}
   command -v par2 >/dev/null || sudo apt-get install -y par2 >/dev/null
   mkdir -p "$data"
   # Deterministic incompressible data, then a PAR2 set from par2cmdline.
@@ -126,21 +126,21 @@ for i in range(n):
         for _ in range(mib):
             f.write(rng.randbytes(1 << 20))
 PY
-  (cd "$data" && par2 create -q -s2380956 -r15 -n1 recovery.par2 data*.bin)
+  (cd "$data" && par2 create -q -s2380956 -r"$redundancy" -n1 recovery.par2 data*.bin)
   (cd "$data" && par2 verify -q recovery.par2)   # pristine must verify clean
   ls -l "$data" >"$OUT/e2e/dataset-listing.txt"
 
   set +e
   python3 "$ROOT/bench/interleave.py" --reps "$REPS" --pristine "$data" \
     --work "$OUT/e2e/work" --results "$OUT/e2e" \
-    --slice-size 2380956 --missing-files 1 --corrupt-slices 15 \
+    --slice-size 2380956 --missing-files 1 --corrupt-slices "$corrupt" \
     "base=$OUT/bin/base-par2bench" \
     "avx2=$OUT/bin/new-par2bench@GOPAR_GF16_KERNEL=$AVX2_KERNEL" \
     "default=$OUT/bin/new-par2bench" \
     $(have_gfni && echo "unverified=$OUT/bin/unv-par2bench") 2>&1 | tee "$OUT/e2e/log.txt"
   local rc=${PIPESTATUS[0]}
   set -e
-  md "## End-to-end ($files x ${mib} MiB, slice 2380956, 15% redundancy, $REPS reps, interleaved)" \
+  md "## End-to-end ($files x ${mib} MiB, slice 2380956, ${redundancy}% redundancy, 1 file deleted / $corrupt slices corrupted, $REPS reps, interleaved)" \
      "\`base\` = old C/cgo backend; \`avx2\` = new code with \`GOPAR_GF16_KERNEL=$AVX2_KERNEL\`; \`default\` = new code, auto kernel; \`unverified\` = \`-tags gf16unverified\`, auto kernel. Overlap = min..max ranges of baseline and arm intersect (a crude noise indicator)."
   [ -f "$OUT/e2e/summary.md" ] && cat "$OUT/e2e/summary.md" >>"$SUMMARY"
   if [ "$rc" != 0 ]; then md "**FAILED: repair mismatch or crashed run, see log.txt**"; exit "$rc"; fi
