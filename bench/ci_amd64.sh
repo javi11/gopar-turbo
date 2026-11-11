@@ -17,7 +17,7 @@ GF16_BENCHTIME=${GF16_BENCHTIME:-300ms}
 # ApplyMatrix has ~60 sub-benchmarks (~2 min per pass); keep one representative
 # shape (3 in x 16 out, 1 MiB) at single and 4-way parallel.
 RSEC_RE=${RSEC_RE:-'Reconstruct_|GenerateParity_|FoldInputs_Realistic|FoldInputsParallel|ApplyMatrix/ic=3,oc=16,db=1M/(Single|DataParallel-4)'}
-GF16_RE=${GF16_RE:-'MulAdd$|MulAddMulti|FoldPattern'}
+GF16_RE=${GF16_RE:-'MulAdd$|MulAddMulti|FoldPattern|Prepare|Finish'}
 REPS=${REPS:-7}
 SUMMARY=${GITHUB_STEP_SUMMARY:-/dev/stdout}
 AVX2_KERNEL='Shuffle (AVX2)'
@@ -258,6 +258,18 @@ profile() {
          --stdio 2>/dev/null | grep -v '^#' | grep -v '^$' >"$P/top-$sc-$arm.txt" || true
       rm -rf "$w"
     done
+  done
+  # Package-level fold benchmark under perf: isolates the fold loop from file I/O.
+  for a in "${arms[@]}"; do
+    IFS='|' read -r arm bin envs <<<"$a"
+    local tb=${bin/par2bench/rsec16.test}
+    env ${envs:+"$envs"} "$PERF" stat -e task-clock,page-faults,context-switches -o "$P/fstat-$arm.txt" -- \
+      "$tb" -test.run '^$' -test.bench 'FoldInputs_Realistic$' -test.benchtime 6x -test.cpuprofile "$P/fcpu-$arm.pprof" >"$P/fold-$arm.txt" 2>&1 || true
+    env ${envs:+"$envs"} "$PERF" record -F 2000 -g -o "$P/fperf-$arm.data" -- \
+      "$tb" -test.run '^$' -test.bench 'FoldInputs_Realistic$' -test.benchtime 6x >/dev/null 2>&1 || true
+    "$PERF" report -i "$P/fperf-$arm.data" --no-children --sort dso,symbol -g none --percent-limit 0.7 --stdio 2>/dev/null \
+      | grep -v '^#' | grep -v '^$' >"$P/ftop-$arm.txt" || true
+    md "### fold bench: $arm"; { grep -h Benchmark "$P/fold-$arm.txt"; cat "$P/fstat-$arm.txt"; head -25 "$P/ftop-$arm.txt"; } | fence
   done
   md "## Profile (perf stat)"; fence <"$P/stat.txt"
   for sc in missing corrupt; do

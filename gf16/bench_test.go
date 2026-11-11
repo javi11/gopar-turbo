@@ -173,3 +173,34 @@ func BenchmarkFoldPattern(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkPrepare and BenchmarkFinish cover the layout conversions the fold
+// loop runs once per input / accumulator (single-threaded in the reader).
+func BenchmarkPrepare(b *testing.B) {
+	for _, s := range benchSizes {
+		b.Run(s.name, func(b *testing.B) {
+			ctx, dst, _ := benchContext(b, s.size)
+			raw := make([]byte, s.size)
+			rand.New(rand.NewSource(5)).Read(raw)
+			b.SetBytes(int64(s.size))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				ctx.Prepare(dst, raw)
+			}
+		})
+	}
+}
+
+func BenchmarkFinish(b *testing.B) {
+	for _, s := range benchSizes {
+		b.Run(s.name, func(b *testing.B) {
+			ctx, buf, _ := benchContext(b, s.size)
+			out := make([]byte, s.size)
+			b.SetBytes(int64(s.size))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				ctx.Finish(buf, out)
+			}
+		})
+	}
+}
