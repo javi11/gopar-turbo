@@ -220,13 +220,20 @@ func (g *gen) tablesFromCoeff() {
 
 // shuffleLoop emits the block loop over n bytes (CX) from src (BX) to dst
 // (AX) with the tables in registers 0..7; it falls through when done.
-func (g *gen) shuffleLoop(add bool) {
+func (g *gen) shuffleLoop(add, pf bool) {
 	v := g.k.vec()
 	g.bcast(8, "mask0f<>(SB)")
 	g.ins("ADDQ CX, AX")
 	g.ins("ADDQ CX, BX")
 	g.ins("NEGQ CX")
 	g.p("loop:")
+	if pf {
+		// SI is the base+n of the next pass's source: pull its lines into L2
+		// while this pass runs (the stream prefetchers need a few misses to
+		// ramp up at every pass start).
+		g.ins("PREFETCHT1 (SI)(CX*1)")
+		g.ins("PREFETCHT1 %d(SI)(CX*1)", v)
+	}
 	g.load(9, "(BX)(CX*1)")
 	g.load(10, fmt.Sprintf("%d(BX)(CX*1)", v))
 	g.bin("and", 11, 8, 10)
@@ -273,7 +280,7 @@ func (g *gen) shuffleKernel(name string, add bool) {
 	g.ins("MOVQ dst+0(FP), AX")
 	g.ins("MOVQ src+8(FP), BX")
 	g.ins("MOVQ n+16(FP), CX")
-	g.shuffleLoop(add)
+	g.shuffleLoop(add, false)
 	g.ret()
 }
 
@@ -283,7 +290,7 @@ func (g *gen) shuffleKernel(name string, add bool) {
 // to dst and zero coefficients are skipped; the Go wrapper has already
 // applied the aliasing sources of dst. R9 srcs cursor, R10 coeffs cursor,
 // R11 sources left, R12 dst, R13 n.
-func (g *gen) shuffleList(name string) {
+func (g *gen) shuffleList(name string, pf bool) {
 	g.fn(name, "0-40")
 	g.ins("MOVQ dst+0(FP), R12")
 	g.ins("MOVQ srcs+8(FP), R9")
@@ -303,7 +310,15 @@ func (g *gen) shuffleList(name string) {
 	g.ins("MOVQ R12, AX")
 	g.ins("MOVQ (R9), BX")
 	g.ins("MOVQ R13, CX")
-	g.shuffleLoop(true)
+	if pf {
+		g.ins("MOVQ BX, SI")
+		g.ins("CMPQ R11, $1")
+		g.ins("JLE nopf")
+		g.ins("MOVQ 8(R9), SI")
+		g.p("nopf:")
+		g.ins("ADDQ R13, SI")
+	}
+	g.shuffleLoop(true, pf)
 	g.p("skip:")
 	g.ins("ADDQ $8, R9")
 	g.ins("ADDQ $2, R10")
@@ -517,7 +532,10 @@ func shuffleFile() string {
 		g.k = c.k
 		g.shuffleKernel("shufMul"+c.name, false)
 		g.shuffleKernel("shufMulAdd"+c.name, true)
-		g.shuffleList("shufMulAddList" + c.name)
+		g.shuffleList("shufMulAddList"+c.name, false)
+		if c.k == avx2 {
+			g.shuffleList("shufMulAddListPf"+c.name, true)
+		}
 		g.shufflePrepare("shufPrepare" + c.name)
 		g.shuffleFinish("shufFinish" + c.name)
 	}

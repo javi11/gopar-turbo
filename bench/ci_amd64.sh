@@ -291,26 +291,30 @@ profile() {
 # default kernel under env knobs, all interleaved. Knob sets: $SWEEP_ARMS, one
 # "label|ENV=V ENV=V" per line (empty env = unmodified default).
 sweep() {
-  local P="$OUT/sweep" i j label envs
+  local P="$OUT/sweep" i j label envs lab
   mkdir -p "$P"; mkdataset
-  local arms=${SWEEP_ARMS:-$'default|\natomic|GOPAR_FOLD_ATOMIC=1\natomic-r64|GOPAR_FOLD_ATOMIC=1 GOPAR_FOLD_RANGE=65536\natomic-r256|GOPAR_FOLD_ATOMIC=1 GOPAR_FOLD_RANGE=262144\natomic-b32|GOPAR_FOLD_ATOMIC=1 GOPAR_FOLD_B=32\natomic-b8|GOPAR_FOLD_ATOMIC=1 GOPAR_FOLD_B=8\nchan-r64|GOPAR_FOLD_RANGE=65536'}
+  local S='Shuffle (AVX2)'
+  local arms=${SWEEP_ARMS:-$'default|\natomic|GOPAR_FOLD_ATOMIC=1\navx2|GOPAR_GF16_KERNEL=Shuffle (AVX2)\navx2-atomic|GOPAR_FOLD_ATOMIC=1,GOPAR_GF16_KERNEL=Shuffle (AVX2)\navx2-pf|GOPAR_GF16_KERNEL=Shuffle (AVX2+pf)\navx2-pf-atomic|GOPAR_FOLD_ATOMIC=1,GOPAR_GF16_KERNEL=Shuffle (AVX2+pf)\natomic-r64|GOPAR_FOLD_ATOMIC=1,GOPAR_FOLD_RANGE=65536\natomic-r256|GOPAR_FOLD_ATOMIC=1,GOPAR_FOLD_RANGE=262144'}
   mapfile -t A <<<"$arms"
-  : >"$P/fold-base.txt"
-  for lab in "${A[@]}"; do : >"$P/fold-${lab%%|*}.txt"; done
+  # Base arms: C default method, and C forced to Shuffle (AVX2) when auto differs.
+  local B_=("base-auto|")
+  forced_ok "$S" && [ "$(shuffle_label)" = base-shuffle-avx2 ] && B_+=("base-shuffle|GF16_FORCE_METHOD=$S")
+  local all=("${B_[@]}" "${A[@]}") fl=()
+  for lab in "${all[@]}"; do : >"$P/fold-${lab%%|*}.txt"; fl+=("${lab%%|*}=$P/fold-${lab%%|*}.txt"); done
   for ((i = 0; i < ${SAMPLES:-8}; i++)); do
-    env "$OUT/bin/base-rsec16.test" -test.run '^$' -test.bench 'FoldInputs_Realistic$' -test.benchtime 3x >>"$P/fold-base.txt"
-    for ((j = 0; j < ${#A[@]}; j++)); do
-      IFS='|' read -r label envs <<<"${A[$(((i + j) % ${#A[@]}))]}"
-      env $envs "$OUT/bin/new-rsec16.test" -test.run '^$' -test.bench 'FoldInputs_Realistic$' -test.benchtime 3x >>"$P/fold-$label.txt"
+    for ((j = 0; j < ${#all[@]}; j++)); do
+      IFS='|' read -r label envs <<<"${all[$(((i + j) % ${#all[@]}))]}"
+      local bin="$OUT/bin/new-rsec16.test"; [[ $label == base-* ]] && bin="$OUT/bin/base-rsec16.test"
+      IFS=, read -ra E <<<"$envs"
+      env "${E[@]}" "$bin" -test.run '^$' -test.bench 'FoldInputs_Realistic$' -test.benchtime 3x >>"$P/fold-$label.txt"
     done
   done
-  local files=("C=$P/fold-base.txt")
-  for lab in "${A[@]}"; do files+=("${lab%%|*}=$P/fold-${lab%%|*}.txt"); done
-  md "## Sweep: FoldInputs_Realistic"; "$(go env GOPATH)/bin/benchstat" "${files[@]}" | tee "$P/fold-benchstat.txt" | fence
-  local bins=("base-auto=$OUT/bin/base-par2bench")
-  for lab in "${A[@]}"; do
+  md "## Sweep: FoldInputs_Realistic"; "$(go env GOPATH)/bin/benchstat" "${fl[@]}" | tee "$P/fold-benchstat.txt" | fence
+  local bins=()
+  for lab in "${all[@]}"; do
     IFS='|' read -r label envs <<<"$lab"
-    bins+=("$label=$OUT/bin/new-par2bench${envs:+@${envs// /,}}")
+    local bin="$OUT/bin/new-par2bench"; [[ $label == base-* ]] && bin="$OUT/bin/base-par2bench"
+    bins+=("$label=$bin${envs:+@$envs}")
   done
   python3 "$ROOT/bench/interleave.py" --reps "${REPS:-7}" --pristine "$OUT/dataset" \
     --work "$P/work" --results "$P/e2e" --slice-size 2380956 --missing-files 1 \

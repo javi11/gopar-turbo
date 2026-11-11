@@ -90,6 +90,17 @@ func shufMulAddListSSSE3(dst *byte, srcs *srcPtrs, coeffs *coefList, nsrc, n int
 //go:noescape
 func shufMulAddListAVX2(dst *byte, srcs *srcPtrs, coeffs *coefList, nsrc, n int)
 
+//go:noescape
+func shufMulAddListPfAVX2(dst *byte, srcs *srcPtrs, coeffs *coefList, nsrc, n int)
+
+func mulAddMultiAVX2Pf(dst *byte, srcs *srcPtrs, coeffs *coefList, nsrc, n int) {
+	checkPassSize(nsrc)
+	if self := selfCoeff(dst, srcs, coeffs, nsrc); self != 0 {
+		shufMulAddAVX2(dst, dst, n, self)
+	}
+	shufMulAddListPfAVX2(dst, srcs, coeffs, nsrc, n)
+}
+
 func mulAddMultiSSSE3(dst *byte, srcs *srcPtrs, coeffs *coefList, nsrc, n int) {
 	checkPassSize(nsrc)
 	if self := selfCoeff(dst, srcs, coeffs, nsrc); self != 0 {
@@ -143,6 +154,9 @@ func init() {
 			prepare: shufPrepareAVX2, finish: shufFinishAVX2}
 		variants = append(variants, avx2)
 		best = avx2
+		pf := *avx2
+		pf.name, pf.mulAddMulti = "Shuffle (AVX2+pf)", mulAddMultiAVX2Pf
+		variants = append(variants, &pf)
 	}
 	// ParPar prefers Affine(GFNI) over Shuffle wherever both exist.
 	for _, k := range affineKernels(&cpu) {
