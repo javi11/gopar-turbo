@@ -3,3 +3,4 @@ build/
 
 # built benchmark binary
 /par2bench
+bench-out/

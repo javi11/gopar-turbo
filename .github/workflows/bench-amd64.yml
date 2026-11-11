@@ -1,0 +1,42 @@
+name: bench-amd64
+
+# Measuring job, not a gate: compares the Go-assembly GF(2^16) backend with the
+# old cgo ParPar backend (9c0f5ca) on the same GitHub runner. It fails only on
+# build errors, crashes and wrong repaired bytes, never for being slower.
+# Rerun: Actions tab -> bench-amd64 -> "Re-run all jobs", or push a change under
+# the watched paths. (`gh workflow run` works once this file is on main.)
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ["gf16/**", "rsec16/**", "bench/**", ".github/workflows/bench-amd64.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }   # baseline commit must be reachable
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - name: Runner CPU
+        run: bench/ci_amd64.sh cpuinfo
+      - name: Build baseline (cgo) and new binaries
+        run: bench/ci_amd64.sh build
+      - name: Package benchmarks (interleaved, benchstat)
+        run: bench/ci_amd64.sh gobench
+      - name: End-to-end verify/repair
+        run: bench/ci_amd64.sh e2e
+      - name: Upload raw results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-amd64-raw
+          path: |
+            bench-out/**
+            !bench-out/bin/**
+            !bench-out/dataset/**
+            !bench-out/e2e/work/**

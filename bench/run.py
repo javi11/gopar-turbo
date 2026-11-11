@@ -32,7 +32,10 @@ def clone_tree(src, dst):
     for name in sorted(os.listdir(src)):
         s = os.path.join(src, name)
         if os.path.isfile(s):
-            subprocess.run(["cp", "-c", s, os.path.join(dst, name)], check=True)
+            # APFS clone on macOS; reflink where the Linux filesystem has it,
+            # otherwise a plain copy (still outside the timed interval).
+            flag = "-c" if sys.platform == "darwin" else "--reflink=auto"
+            subprocess.run(["cp", flag, s, os.path.join(dst, name)], check=True)
 
 
 def warm_cache(directory):
