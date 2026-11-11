@@ -14,7 +14,9 @@ BASE=${BASE_DIR:-$ROOT/../baseline}
 SAMPLES=${SAMPLES:-10}
 RSEC_BENCHTIME=${RSEC_BENCHTIME:-1s}
 GF16_BENCHTIME=${GF16_BENCHTIME:-300ms}
-RSEC_RE=${RSEC_RE:-'Reconstruct_|GenerateParity_|FoldInputs|ApplyMatrix'}
+# ApplyMatrix has ~60 sub-benchmarks (~2 min per pass); keep one representative
+# shape (3 in x 16 out, 1 MiB) at single and 4-way parallel.
+RSEC_RE=${RSEC_RE:-'Reconstruct_|GenerateParity_|FoldInputs_Realistic|FoldInputsParallel|ApplyMatrix/ic=3,oc=16,db=1M/(Single|DataParallel-4)'}
 GF16_RE=${GF16_RE:-'MulAdd$|MulAddMulti|FoldPattern'}
 REPS=${REPS:-7}
 SUMMARY=${GITHUB_STEP_SUMMARY:-/dev/stdout}
@@ -72,8 +74,12 @@ variants() { # $1 = package
   echo "base|$OUT/bin/base-$1.test|"
   echo "avx2|$OUT/bin/new-$1.test|GOPAR_GF16_KERNEL=$AVX2_KERNEL"
   echo "default|$OUT/bin/new-$1.test|"
-  echo "unverified|$OUT/bin/unv-$1.test|"
+  # Without GFNI the unverified build selects the same kernel as the default
+  # one, so the arm would only duplicate it.
+  have_gfni && echo "unverified|$OUT/bin/unv-$1.test|"
+  return 0
 }
+have_gfni() { grep -q -m1 -w gfni /proc/cpuinfo; }
 
 gobench_pkg() { # pkg regex benchtime
   local pkg=$1 re=$2 bt=$3 dir="$OUT/gobench" i
@@ -83,7 +89,7 @@ gobench_pkg() { # pkg regex benchtime
     # Rotate order each sample so no variant is always first/last.
     for ((j = 0; j < ${#V[@]}; j++)); do
       IFS='|' read -r name bin envs <<<"${V[$(((i + j) % ${#V[@]}))]}"
-      echo "sample $i $name" >>"$dir/$pkg.order"
+      echo "$(date -u +%T) $pkg sample $i $name" | tee -a "$dir/$pkg.order"
       # envs holds one KEY=VALUE (value may contain spaces), so no word splitting.
       env ${envs:+"$envs"} "$bin" -test.run '^$' -test.bench "$re" -test.benchtime "$bt" \
         >>"$dir/$pkg-$name.txt" || { echo "FAILED: $pkg $name" >&2; exit 1; }
@@ -99,6 +105,7 @@ gobench_pkg() { # pkg regex benchtime
 
 gobench() {
   md "## Package benchmarks"
+  have_gfni || md "_No GFNI on this CPU: the \`-tags gf16unverified\` arm would select the same kernel as \`default\` and is omitted._"
   gobench_pkg rsec16 "$RSEC_RE" "$RSEC_BENCHTIME"
   if [ "$(cat "$OUT/gf16_compare")" = 1 ]; then
     gobench_pkg gf16 "$GF16_RE" "$GF16_BENCHTIME"
@@ -130,7 +137,7 @@ PY
     "base=$OUT/bin/base-par2bench" \
     "avx2=$OUT/bin/new-par2bench@GOPAR_GF16_KERNEL=$AVX2_KERNEL" \
     "default=$OUT/bin/new-par2bench" \
-    "unverified=$OUT/bin/unv-par2bench" 2>&1 | tee "$OUT/e2e/log.txt"
+    $(have_gfni && echo "unverified=$OUT/bin/unv-par2bench") 2>&1 | tee "$OUT/e2e/log.txt"
   local rc=${PIPESTATUS[0]}
   set -e
   md "## End-to-end ($files x ${mib} MiB, slice 2380956, 15% redundancy, $REPS reps, interleaved)" \
