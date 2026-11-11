@@ -14,6 +14,10 @@ slice size 2,380,956, 295 recovery blocks (15% redundancy).
 
 Reproduce with `bench/run.py` — see [README.md](README.md).
 
+> Tables in this file that say "cgo" were measured with the former ParPar C
+> backend, which has since been replaced by Go assembly. For the cgo-versus-Go-asm
+> comparison see [2026-11-11](#2026-11-11-go-assembly-backend-vs-the-former-cgo-parpar-c-backend).
+
 ## Full set, 4.36 GiB
 
 | Scenario | Tool | Time | Peak RSS | Correct |
@@ -454,3 +458,56 @@ ownership, partial output chunks, final-file clipping, the 1 MiB batch limit
 and individual slices larger than that limit. Independent read-only review
 found no correctness blocker. A fresh build has the same SHA-256 as the timed
 candidate binary.
+
+## 2026-11-11: Go assembly backend vs the former cgo (ParPar C) backend
+
+The cgo/C kernel backend was replaced with Go assembly ports of the same ParPar
+algorithms. This section compares the two builds directly. Older "cgo" tables
+above are left as measured and describe the former C backend.
+
+- Host: Apple M4, 10 cores, macOS, Go 1.27; kernel method "CLMul (SHA3)" in both
+  builds
+- cgo reference binary: built from commit `9c0f5ca`, the last commit with the C
+  backend
+- Dataset: 10 random 100 MiB files (1000 MiB), slice size 2,380,956, 68 recovery
+  blocks (15%); PAR2 set created with stock par2cmdline
+- Warm page cache; each run starts from a fresh APFS clone with seeded,
+  byte-identical damage; binaries interleaved rep by rep; median of 10 reps;
+  repaired output MD5-checked against pristine
+
+### End to end
+
+| Scenario | cgo (C kernel) time | Go asm time | cgo peak RSS | Go asm peak RSS | Correct (Go asm) |
+|---|---:|---:|---:|---:|:---:|
+| verify-intact | 0.20s | 0.20s | 58 MB | 58 MB | — |
+| verify-damaged (50 slices) | 0.18s | 0.18s | 58 MB | 58 MB | — |
+| repair-missing (1 file) | 0.58s | 0.58s | 414 MB | 406 MB | 10/10 |
+| repair-corrupt (65 slices) | 0.70s | 0.67s | 508 MB | 498 MB | 10/10 |
+
+### rsec16 package benchmarks
+
+benchstat, 6 interleaved samples each, cgo to Go asm:
+
+| Benchmark | cgo | Go asm | Change | p |
+|---|---:|---:|---:|---:|
+| Reconstruct_100x10_64K | 861.7µs | 795.8µs | −7.65% | 0.026 |
+| GenerateParity_100x10_64K | 895.1µs | 799.3µs | −10.70% | 0.002 |
+| Reconstruct_1000x50_64K | 27.43ms | 24.75ms | not significant | 0.310 |
+| Reconstruct_100x10_1M | 10.61ms | 10.39ms | not significant | 0.240 |
+| FoldInputs_Realistic | 101.44ms | 96.99ms | not significant | 0.485 |
+| FoldInputs_ApplyMatrixReference | 210.9ms | 218.1ms | not significant | 0.818 |
+| FoldInputsParallelLargeSlice | 5.000ms | 4.932ms | not significant | 0.180 |
+
+FoldInputsParallelLargeSlice allocations per op: 1229.5 to 193.0 (−84.3%).
+Geomean time: −4.76%.
+
+### Caveats
+
+- The repair runs are well under a second on this set, so end-to-end
+  differences are small in absolute terms. The honest reading is parity,
+  slightly ahead on repair-corrupt. The machine was not idle (load average
+  ~3-4).
+- All numbers are arm64 (Apple M4) only. **amd64 performance is measured by the `bench-amd64` CI workflow, not here.** The
+  GFNI kernels are part of the default build and are chosen at run time on
+  CPUs with GFNI.
+- No comparison against par2cmdline-turbo was rerun for this section.

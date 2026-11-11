@@ -10,7 +10,7 @@ import (
 
 // Each pass consists of independent tasks. Operations inside a task remain
 // ordered; a barrier separates passes. This expresses transforms as batched
-// region arithmetic without crossing cgo for each individual butterfly.
+// region arithmetic without per-butterfly call overhead.
 type regionProgram [][][]gf16.Operation
 
 func addRegion(ops []gf16.Operation, dst, src int, c gf2p16.T) []gf16.Operation {

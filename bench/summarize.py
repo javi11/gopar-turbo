@@ -11,7 +11,7 @@ from collections import defaultdict
 
 GIB = 1024 ** 3
 TOOL_ORDER = [
-    "gopar-turbo (cgo/SIMD)",
+    "gopar-turbo (SIMD)",
     "gopar-turbo (pure Go)",
     "par2cmdline-turbo",
     "par2turbo -N (misalign)",

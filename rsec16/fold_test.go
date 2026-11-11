@@ -96,9 +96,9 @@ func TestFoldInputsClearsBufferBetweenInputs(t *testing.T) {
 }
 
 // applyMatrixParallelData does the same arithmetic without the SIMD backend,
-// so comparing against it holds both a cgo and a non-cgo build to the same
-// bytes. Without this, TestFoldInputsMatchesApplyMatrix would only ever
-// compare a backend against itself.
+// so comparing against it holds every SIMD kernel to the same bytes. Without
+// this, TestFoldInputsMatchesApplyMatrix would only ever compare a backend
+// against itself.
 func TestFoldInputsMatchesPureGoAcrossBackends(t *testing.T) {
 	rng := rand.New(rand.NewSource(23))
 	numInputs, numOut, sliceSize := 12, 4, 512

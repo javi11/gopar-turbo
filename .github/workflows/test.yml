@@ -2,68 +2,87 @@ name: test
 on: [push, pull_request]
 
 jobs:
-  # SIMD (cgo) backend: build the static lib from vendored sources on each
-  # platform, then run the full suite through the ParPar kernels.
-  test-cgo:
+  # One matrix for every supported platform: pure Go plus Go assembly, no C
+  # toolchain involved. Race is enabled wherever the platform supports it
+  # (it needs CGO_ENABLED=1, which is only a runtime requirement of the race
+  # detector, not of gopar-turbo).
+  test:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, target: native }   # arm64
-          - { os: macos-15-intel, target: native } # amd64
-          - { os: ubuntu-latest, target: linux/amd64 }
-          - { os: ubuntu-24.04-arm, target: linux/arm64 }
+          - { os: ubuntu-latest, name: linux-amd64, race: true }
+          - { os: ubuntu-24.04-arm, name: linux-arm64, race: true }
+          - { os: macos-latest, name: macos-arm64, race: true }   # arm64
+          - { os: macos-15-intel, name: macos-amd64, race: true } # amd64
+          - { os: windows-latest, name: windows-amd64, race: false }
+    name: test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: "1.26" }
-      - name: Build gf16 static library
-        run: make -C gf16 ${{ matrix.target }}
-      - name: Test (cgo, race)
-        run: go test ./... -race
+        with: { go-version-file: go.mod }
+      - name: Vet
+        run: go vet ./...
+      - name: Test (race)
+        if: matrix.race
+        run: go test ./... -race -count=1
         env: { CGO_ENABLED: "1" }
+      - name: Test (no race)
+        if: ${{ !matrix.race }}
+        run: go test ./... -count=1
+      - name: Test (CGO_ENABLED=0)
+        run: go test ./... -count=1
+        env: { CGO_ENABLED: "0" }
 
-  test-cgo-windows:
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: "msys2 {0}"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          install: mingw-w64-x86_64-gcc make
-          path-type: inherit
-      - uses: actions/setup-go@v5
-        with: { go-version: "1.26" }
-      - name: Build gf16 static library
-        run: make -C gf16 windows/amd64
-      - name: Test (cgo)
-        run: go test ./...
-        env: { CGO_ENABLED: "1" }
-
-  # Pure-Go fallback backend: must pass everywhere with CGO_ENABLED=0.
-  test-purego:
+  # Run the whole suite through every kernel the runner CPU supports by
+  # forcing it with GOPAR_GF16_KERNEL (an unknown or unsupported name is
+  # ignored, so the step prints the kernel that was really active).
+  kernels:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        include:
+          - { os: ubuntu-latest, kernel: purego }
+          - { os: ubuntu-latest, kernel: "Shuffle (SSSE3)" }
+          - { os: ubuntu-latest, kernel: "Shuffle (AVX2)" }
+          - { os: ubuntu-24.04-arm, kernel: purego }
+          - { os: ubuntu-24.04-arm, kernel: "CLMul (NEON)" }
+          - { os: ubuntu-24.04-arm, kernel: "CLMul (SHA3)" }
+          - { os: macos-latest, kernel: purego }
+          - { os: macos-latest, kernel: "CLMul (NEON)" }
+          - { os: macos-latest, kernel: "CLMul (SHA3)" }
+    name: kernel ${{ matrix.kernel }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: "1.26" }
-      - name: Test (pure Go)
-        run: go test ./...
-        env: { CGO_ENABLED: "0" }
+        with: { go-version-file: go.mod }
+      - name: Kernels this CPU can run
+        run: go test ./gf16 -run TestPrintKernels -v -count=1
+      - name: Test rsec16 and par2 with the forced kernel
+        run: go test ./rsec16 ./par2 -count=1
+        env: { GOPAR_GF16_KERNEL: "${{ matrix.kernel }}" }
 
-  vet:
+  # GFNI kernels are part of the default build and chosen at run time. The
+  # shared differential tests pick up whichever of them the runner CPU can
+  # execute; on CPUs without GFNI this job only shows the CPU flags and the
+  # fallback to the Shuffle kernels.
+  gfni:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: "1.26" }
-      - run: make -C gf16 linux/amd64
-      - run: go vet ./...
+        with: { go-version-file: go.mod }
+      - name: CPU features
+        run: grep -o -w -E 'gfni|avx2|avx512f|avx512bw|avx512vl' /proc/cpuinfo | sort | uniq -c
+      - name: Test gf16 (default build)
+        run: |
+          go test ./gf16 -run TestPrintKernels -v -count=1
+          go test ./gf16 -count=1
+      - name: Test rsec16 and par2 with each GFNI kernel
+        run: |
+          for k in "Affine2x (GFNI+AVX2)" "Affine2x (GFNI+AVX512)"; do
+            echo "== $k"
+            GOPAR_GF16_KERNEL="$k" go test ./rsec16 ./par2 -count=1
+          done

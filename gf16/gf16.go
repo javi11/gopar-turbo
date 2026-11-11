@@ -1,7 +1,28 @@
 // Package gf16 provides GF(2^16) region multiply operations for PAR2
-// Reed-Solomon coding. With cgo enabled it uses ParPar's SIMD kernels
-// (SSE2..AVX-512/GFNI on amd64, NEON/SVE2 on arm64); otherwise it falls
-// back to the pure-Go gf2p16 implementation.
+// Reed-Solomon coding. It is pure Go plus Go assembly (no cgo, no C
+// toolchain): at init it selects, by GOARCH and CPU features, the fastest
+// of these kernels, or the portable pure-Go fallback built on gf2p16:
+//
+//   - arm64: "CLMul (NEON)" (PMULL, every arm64 CPU) and "CLMul (SHA3)"
+//     (the same with EOR3, preferred where available);
+//   - amd64: "Shuffle (SSSE3)" and "Shuffle (AVX2)" (PSHUFB nibble tables,
+//     built inline from the coefficient), plus
+//     "Affine2x (GFNI+AVX2)" and "Affine2x (GFNI+AVX512)" (GF2P8AFFINEQB) on
+//     CPUs with GFNI, preferred over Shuffle there;
+//   - everything else: the pure-Go path.
+//
+// The kernels are ports of the algorithms of ParPar (see LICENSE.parpar).
+//
+// # Forcing a kernel
+//
+// The environment variable GOPAR_GF16_KERNEL, read once at program start,
+// overrides the default choice. Its value is either "purego" or the exact
+// name Context.MethodName reports for a kernel (for example "CLMul (NEON)").
+// An unknown name, or a kernel this CPU cannot run, is ignored and the
+// default is kept; it never causes a failure. This lets the whole stack
+// (rsec16, par2) be exercised end to end with each kernel.
+//
+// Adding an architecture: see the "Adding an architecture" notes in kernel.go.
 //
 // Usage pattern (streaming fold or matrix apply):
 //

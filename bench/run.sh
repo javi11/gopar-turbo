@@ -10,8 +10,7 @@ set -uo pipefail
 BENCH_ROOT=${BENCH_ROOT:?set BENCH_ROOT to the staging directory}
 PAR2_TURBO=${PAR2_TURBO:?set PAR2_TURBO to the par2cmdline-turbo binary}
 PAR2_STOCK=${PAR2_STOCK:-/opt/homebrew/bin/par2}
-GOPAR_CGO=${GOPAR_CGO:?set GOPAR_CGO to the cgo par2bench binary}
-GOPAR_PURE=${GOPAR_PURE:?set GOPAR_PURE to the pure-Go par2bench binary}
+GOPAR=${GOPAR:?set GOPAR to the par2bench binary (run it with GOPAR_GF16_KERNEL=purego for the pure-Go arm)}
 SLICE_SIZE=${SLICE_SIZE:-2380956}
 
 WORK="$BENCH_ROOT/work"
