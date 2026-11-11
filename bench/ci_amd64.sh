@@ -225,7 +225,7 @@ profile() {
   sudo apt-get install -y linux-tools-common "linux-tools-$(uname -r)" >/dev/null 2>&1 \
     || sudo apt-get install -y linux-tools-generic >/dev/null 2>&1 || true
   sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0 >/dev/null 2>&1 || true
-  local PERF; PERF=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | tail -1); PERF=${PERF:-perf}
+  local PERF; PERF=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | tail -1 || true); PERF=${PERF:-perf}
   "$PERF" --version | tee "$P/perf-version.txt" || { md "_perf unavailable_"; return 0; }
   local arms=("base-auto|$OUT/bin/base-par2bench|")
   if [ "$(shuffle_label)" = base-shuffle-avx2 ] && forced_ok "$AVX2_KERNEL"; then
